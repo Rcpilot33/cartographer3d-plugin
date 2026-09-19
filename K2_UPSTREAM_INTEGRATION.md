@@ -15,6 +15,10 @@ It includes all 41 upstream-only commits, not just selected mesh fixes.
   callbacks. A failed finalization leaves probing disabled.
 - Disconnected Z homing is rejected before arming dispatch. Endstop queries
   remain fail-closed, and homing cleanup still disarms after disconnection.
+- Informational `QUERY_PROBE` preserves the original K2 disconnected "open"
+  response without sampling. This is not an indication that homing is safe:
+  the separate homing endstop still reports triggered. Every new sample session
+  rejects a disconnected MCU, even while an aborted session awaits cleanup.
 - Retains legacy probe entry points and vectorized temperature/distance/grid
   processing, adapted to upstream's expanded mesh-edge sample tolerance.
 - Retains touch threshold/speed overrides and retract-distance phantom rejection.
@@ -30,15 +34,16 @@ It includes all 41 upstream-only commits, not just selected mesh fixes.
 
 Using upstream's unchanged `uv.lock`:
 
-- Python 3.12 with SciPy: **474 tests passed**.
-- Python 3.8 without SciPy: **468 passed**; six tests that explicitly require
+- Python 3.12 with SciPy: **479 tests passed**.
+- Python 3.8 without SciPy: **473 passed**; six tests that explicitly require
   installed SciPy were deselected. Missing-SciPy error handling remains tested.
 - Ruff lint and formatting passed.
 - Basedpyright: no errors (warnings remain).
 
 The additional tests cover K2 detection, timeout restoration, reconnect ordering
 and failure blocking, disconnected homing, cleanup, edge sample retention,
-empty sample batches, touch overrides, and bounded phantom rejection.
+empty sample batches, touch overrides, bounded phantom rejection, disconnected
+informational queries, session-entry rejection, and session recovery after reconnect.
 
 For a standard checkout, use `uv sync --locked --all-extras --all-groups`,
 `uv run pytest`, `uv run ruff check`, `uv run ruff format --check`, and

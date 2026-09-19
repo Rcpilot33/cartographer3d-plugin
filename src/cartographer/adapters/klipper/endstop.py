@@ -90,6 +90,7 @@ class KlipperEndstopBase(MCU_endstop):
     @reraise_for_klipper
     def query_endstop(self, print_time: float) -> int:
         if self.mcu.is_disconnected():
+            # Homing must fail closed, unlike the informational QUERY_PROBE result.
             return 1
         return 1 if self.endstop.query_is_triggered(print_time) else 0
 

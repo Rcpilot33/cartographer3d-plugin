@@ -96,6 +96,7 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
         )
         platform.register_config_callback(self._initialize)
 
+    @override
     def is_disconnected(self) -> bool:
         return self._platform.is_disconnected()
 
@@ -194,6 +195,8 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
 
     @override
     def start_session(self, start_condition: Callable[[Sample], bool] | None = None) -> Session[Sample]:
+        # Guard every new session, including when an aborted session still exists.
+        self.ensure_connected()
         return self._stream.start_session(start_condition)
 
     @override

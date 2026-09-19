@@ -83,6 +83,7 @@ def session(mocker: MockerFixture) -> Session[Sample]:
 @pytest.fixture
 def mcu(mocker: MockerFixture, session: Session[Sample]) -> Mcu:
     mock = mocker.MagicMock(spec=Mcu, autospec=True, instance=True)
+    mock.is_disconnected.return_value = False
     mock.start_session = mocker.Mock(return_value=session)
     return mock
 

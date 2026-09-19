@@ -7,10 +7,12 @@ from numpy.polynomial import Polynomial
 
 from cartographer.interfaces.configuration import Configuration, ScanModelConfiguration
 from cartographer.interfaces.printer import HomingState, Position, Sample, Toolhead
+from cartographer.macros.probe import QueryProbeMacro
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
+    from cartographer.interfaces.printer import MacroParams, Mcu
     from cartographer.macros.axis_twist_compensation import AxisTwistCompensationAdapter
     from cartographer.probe.probe import Probe
     from cartographer.stream import Session
@@ -142,9 +144,42 @@ def test_endstop_is_triggered(mocker: MockerFixture, probe: Probe):
 
 
 def test_endstop_is_not_triggered(mocker: MockerFixture, probe: Probe):
-    probe.scan.measure_distance = mocker.Mock(return_value=1)
+    probe.scan.measure_distance = mocker.Mock(return_value=3)
 
-    assert probe.scan.query_is_triggered(0) is True
+    assert probe.scan.query_is_triggered(0) is False
+
+
+@pytest.mark.parametrize("has_model", [True, False])
+def test_query_probe_disconnected_does_not_start_session(
+    mocker: MockerFixture,
+    probe: Probe,
+    mcu: Mcu,
+    params: MacroParams,
+    has_model: bool,
+) -> None:
+    mocker.patch.object(mcu, "is_disconnected", return_value=True)
+    model_check = mocker.patch.object(probe.scan, "has_model", return_value=has_model)
+    measure = mocker.spy(probe.scan, "measure_distance")
+    start_session = mocker.spy(mcu, "start_session")
+    macro = QueryProbeMacro(probe)
+    macro.last_triggered = True
+
+    macro.run(params)
+
+    assert macro.last_triggered is False
+    model_check.assert_not_called()
+    measure.assert_not_called()
+    start_session.assert_not_called()
+
+
+def test_connected_query_without_model_still_reports_triggered(
+    mocker: MockerFixture,
+    probe: Probe,
+) -> None:
+    mocker.patch.object(probe.scan, "has_model", return_value=False)
+    measure = mocker.spy(probe.scan, "measure_distance")
+    assert probe.query_is_triggered() is True
+    measure.assert_not_called()
 
 
 def test_probe_does_homing_move(mocker: MockerFixture, probe: Probe, toolhead: Toolhead):

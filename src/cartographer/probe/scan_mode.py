@@ -147,7 +147,10 @@ class ScanMode(ScanModelSelectorMixin, ProbeMode, Endstop):
 
     @override
     def query_is_triggered(self, print_time: float) -> bool:
-        # If MCU is disconnected, report as not triggered (safe state)
+        # Preserve K2's informational QUERY_PROBE response while disconnected.
+        # The homing endstop adapter separately reports triggered (fail-closed).
+        if self._mcu.is_disconnected():
+            return False
         if not self.has_model():
             return True  # No model loaded, assume triggered
         distance = self.measure_distance(time=print_time)

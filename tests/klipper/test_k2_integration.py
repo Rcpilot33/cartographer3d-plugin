@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def carto_mcu(mocker: MockerFixture) -> type:
-    mocker.patch.dict(sys.modules, {"extras.thermistor": Mock()})
+    mocker.patch.dict(sys.modules, {"extras.thermistor": Mock(), "greenlet": Mock()})
     return importlib.import_module("cartographer.mcu.mcu").CartographerMcu
 
 
@@ -142,3 +142,32 @@ def test_stop_homing_still_disarms_after_disconnect(carto_mcu: type) -> None:
     with pytest.raises(McuDisconnectedError):
         mcu.stop_homing(1.0)
     platform.create_trigger_dispatch.return_value.stop.assert_called_once()
+
+
+@pytest.mark.parametrize("active_session", [False, True])
+def test_disconnected_session_entry_rejected_and_reconnect_allowed(
+    carto_mcu: type,
+    mocker: MockerFixture,
+    active_session: bool,
+) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    mcu = carto_mcu(platform, Mock())
+    start_streaming = mocker.patch.object(mcu, "start_streaming")
+    mocker.patch.object(mcu, "stop_streaming")
+    existing = mcu.start_session() if active_session else None
+
+    platform.is_disconnected.return_value = True
+    platform.register_lifecycle_handlers.call_args.kwargs["on_disconnect"]()
+    with pytest.raises(McuDisconnectedError):
+        mcu.start_session()
+    assert start_streaming.call_count == int(active_session)
+
+    if existing is not None:
+        with existing, pytest.raises(McuDisconnectedError):
+            existing.wait_for(lambda _samples: False)
+
+    platform.is_disconnected.return_value = False
+    with mcu.start_session() as recovered:
+        assert recovered.get_items() == []
+    assert start_streaming.call_count == int(active_session) + 1
