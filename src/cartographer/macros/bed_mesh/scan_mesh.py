@@ -29,6 +29,7 @@ from cartographer.macros.bed_mesh.helpers import (
     SampleProcessor,
 )
 from cartographer.macros.bed_mesh.paths.alternating_snake import AlternatingSnakePathGenerator
+from cartographer.macros.bed_mesh.paths.hilbert_path import HilbertPathGenerator
 from cartographer.macros.bed_mesh.paths.random_path import RandomPathGenerator
 from cartographer.macros.bed_mesh.paths.snake_path import SnakePathGenerator
 from cartographer.macros.bed_mesh.paths.spiral_path import SpiralPathGenerator
@@ -42,6 +43,31 @@ if TYPE_CHECKING:
     from cartographer.probe import Probe
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_max_corner_radius(value: str, name: str) -> float | None:
+    stripped = value.strip()
+    if stripped.lower() == "auto":
+        return None
+
+    try:
+        radius = float(stripped)
+    except ValueError:
+        msg = f"{name} must be 'auto' or a non-negative number, got {value!r}"
+        raise ValueError(msg) from None
+
+    if radius < 0:
+        msg = f"{name} must be 'auto' or a non-negative number, got {radius}"
+        raise ValueError(msg)
+
+    return radius
+
+
+def _get_max_corner_radius(params: MacroParams, config_default: float | None) -> float | None:
+    value = params.get("MAX_CORNER_RADIUS", default=None)
+    if value is None:
+        return config_default
+    return _parse_max_corner_radius(value, "MAX_CORNER_RADIUS")
 
 
 @dataclass(frozen=True)
@@ -58,6 +84,7 @@ class BedMeshCalibrateConfiguration:
     direction: str
     height: float
     path: MeshPath
+    max_corner_radius: float | None = None
 
     @staticmethod
     def from_config(config: Configuration):
@@ -72,6 +99,7 @@ class BedMeshCalibrateConfiguration:
             direction=config.scan.mesh_direction,
             height=config.scan.mesh_height,
             path=config.scan.mesh_path,
+            max_corner_radius=config.scan.mesh_max_corner_radius,
             faulty_regions=list(map(lambda r: Region(r[0], r[1]), config.bed_mesh.faulty_regions)),
         )
 
@@ -84,6 +112,7 @@ PATH_GENERATOR_MAP = {
     MeshPath.ALTERNATING_SNAKE: AlternatingSnakePathGenerator,
     MeshPath.SPIRAL: SpiralPathGenerator,
     MeshPath.RANDOM: RandomPathGenerator,
+    MeshPath.HILBERT: HilbertPathGenerator,
 }
 
 
@@ -113,6 +142,11 @@ class BedMeshScanAllParams:
     speed: float = param("Scan speed", default=config_ref(BedMeshConfig, "speed"), min=50)
     height: float = param("Scan height", default=config_ref(ScanConfig, "mesh_height"), min=0.5, max=5)
     runs: int = param("Number of scan passes", default=config_ref(ScanConfig, "mesh_runs"), min=1)
+    max_corner_radius: str | None = param(
+        "Maximum corner radius (mm) for scan path arcs."
+        " Use AUTO for automatic radius, 0 to disable smoothing arcs, or a positive number to cap auto radius.",
+        default=None,
+    )
 
 
 @dataclass
@@ -156,7 +190,8 @@ class MeshScanParams:
         # Create path generator
         direction: str = get_choice(params, "DIRECTION", _directions, default=config.direction)
         path_type = get_choice(params, "PATH", default=config.path, choices=PATH_GENERATOR_MAP.keys())
-        path_generator = PATH_GENERATOR_MAP[path_type](direction)
+        max_corner_radius = _get_max_corner_radius(params, config.max_corner_radius)
+        path_generator = PATH_GENERATOR_MAP[path_type](direction, max_corner_radius)
 
         return cls(
             mesh_bounds=mesh_bounds,
@@ -310,19 +345,14 @@ class BedMeshCalibrateMacro(Macro, SupportsFallbackMacro):
     def _process_samples_to_positions(self, grid: MeshGrid, samples: list[Sample], height: float) -> list[Position]:
         """Process samples into final mesh positions."""
         sample_processor = SampleProcessor(grid)
-        
-        
-        logger.info("Processing %d samples into %dx%d grid...", 
-            len(samples), grid.x_resolution, grid.y_resolution)
-            
+
+        logger.info("Processing %d samples into %dx%d grid...", len(samples), grid.x_resolution, grid.y_resolution)
+
         # Step 1: Compute heights
         heights = self.probe.scan.calculate_sample_distance_batch(samples)
-            
+
         # Step 2: Bin samples to grid
         results = sample_processor.assign_samples_to_grid_batch(samples, heights)
-            
-        # Step 3: Summary
-        valid_count = sum(1 for r in results if r.sample_count > 0)
 
         # Convert results to positions
         positions = self._results_to_positions(results, height)
@@ -332,11 +362,35 @@ class BedMeshCalibrateMacro(Macro, SupportsFallbackMacro):
         """Convert grid results to Position objects."""
         positions: list[Position] = []
 
+        total_samples = sum(r.sample_count for r in results)
+        invalid_points = [(r.point, r.sample_count) for r in results if not isfinite(r.z)]
+        sparse_points = [(r.point, r.sample_count) for r in results if isfinite(r.z) and r.sample_count < 3]
+
+        if invalid_points:
+            invalid_list = ", ".join(f"({p[0]:.2f},{p[1]:.2f}) samples={n}" for p, n in invalid_points)
+            lines = [
+                f"Mesh scan failed: {len(invalid_points)}/{len(results)} grid points have no valid samples.",
+                f"Total samples collected: {total_samples}.",
+                f"Invalid grid points: {invalid_list}.",
+            ]
+            if sparse_points:
+                sparse_list = ", ".join(f"({p[0]:.2f},{p[1]:.2f})={n}" for p, n in sparse_points)
+                lines.append(f"Sparse grid points (<3 samples): {sparse_list}.")
+            msg = " ".join(lines)
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+        if sparse_points:
+            sparse_list = ", ".join(f"({p[0]:.2f},{p[1]:.2f})={n}" for p, n in sparse_points)
+            logger.warning(
+                "Mesh scan: %d/%d grid points have fewer than 3 samples: %s",
+                len(sparse_points),
+                len(results),
+                sparse_list,
+            )
+
         for result in results:
             rx, ry = result.point
-            if not isfinite(result.z):
-                msg = f"Grid point ({rx:.2f},{ry:.2f}) has no valid samples"
-                raise RuntimeError(msg)
 
             # Calculate compensated height
             z = height - result.z

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from cartographer.macros.axis_twist_compensation import AxisTwistCompensationMacro, AxisTwistParams
 from cartographer.macros.backlash import EstimateBacklashMacro, EstimateBacklashParams
 from cartographer.macros.bed_mesh.scan_mesh import BedMeshCalibrateMacro, BedMeshScanAllParams
-from cartographer.macros.fields import ConfigRef, ParamInfo, get_all_params
+from cartographer.macros.fields import ComputedDefault, ConfigRef, ParamInfo, get_all_params
 from cartographer.macros.model_manager import ModelManagerParams, ScanModelManager, TouchModelManager
 from cartographer.macros.probe import (
     ProbeAccuracyMacro,
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 # Macros in the order they should appear in docs.
 # (macro_name, macro_class, params_dataclass)
 MACROS: list[tuple[str, type[Macro], type]] = [
-    # Standard probe macros (no CARTOGRAPHER_ prefix)
+    # Standard probe macros (no CARTOGRAPHER_ prefix) — only registered when register_as_probe is true
     ("PROBE", ProbeMacro, ProbeMacroParams),
     ("PROBE_ACCURACY", ProbeAccuracyMacro, ProbeAccuracyParams),
     ("QUERY_PROBE", QueryProbeMacro, QueryProbeMacroParams),
@@ -51,6 +51,7 @@ MACROS: list[tuple[str, type[Macro], type]] = [
     ("CARTOGRAPHER_QUERY", QueryMacro, QueryParams),
     ("CARTOGRAPHER_STREAM", StreamMacro, StreamParams),
     ("CARTOGRAPHER_TEMPERATURE_CALIBRATE", TemperatureCalibrateMacro, TemperatureCalibrateParams),
+    ("CARTOGRAPHER_SCAN_PROBE", ProbeMacro, ProbeMacroParams),
     ("CARTOGRAPHER_SCAN_CALIBRATE", ScanCalibrateMacro, ScanCalibrateParams),
     ("CARTOGRAPHER_SCAN_ACCURACY", ScanAccuracyMacro, ScanAccuracyParams),
     ("CARTOGRAPHER_SCAN_MODEL", ScanModelManager, ModelManagerParams),
@@ -66,6 +67,8 @@ MACROS: list[tuple[str, type[Macro], type]] = [
 
 def _format_default(value: object) -> str:
     """Format a default value for display in docs."""
+    if isinstance(value, ComputedDefault):
+        return f"computed: {value.display}"
     if isinstance(value, ConfigRef):
         return f"config '{value.option_name}'"
     if isinstance(value, bool):
@@ -117,8 +120,8 @@ def _format_example_value(p: ParamInfo) -> str:
     """Format a parameter value for the example line."""
     if p.required:
         return f"<{p.name.lower()}>"
-    if isinstance(p.default, ConfigRef):
-        return f"<{p.name.lower()}>"
+    if isinstance(p.default, (ConfigRef, ComputedDefault)):
+        return f"<{p.name.lower()}>" if isinstance(p.default, ConfigRef) else ""
     if isinstance(p.default, bool):
         return "yes" if p.default else "no"
     if isinstance(p.default, Enum):

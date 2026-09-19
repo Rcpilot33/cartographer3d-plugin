@@ -1,6 +1,6 @@
 # https://github.com/Klipper3d/klipper/blob/master/klippy/gcode.py
-from collections.abc import Callable
-from typing import NamedTuple, overload
+from collections.abc import Callable, Sequence
+from typing import overload
 
 class CommandError(Exception): ...
 
@@ -59,11 +59,19 @@ class GCodeCommand:
         below: float | None = None,
     ) -> float | None: ...
 
-class Coord(NamedTuple):
-    x: float
-    y: float
-    z: float
-    e: float
+class Coord(tuple[float, ...]):
+    @overload
+    def __new__(cls, t: Sequence[float]) -> Coord: ...
+    @overload
+    def __new__(cls, x: float, y: float, z: float, e: float) -> Coord: ...
+    @property
+    def x(self) -> float: ...
+    @property
+    def y(self) -> float: ...
+    @property
+    def z(self) -> float: ...
+    @property
+    def e(self) -> float: ...
 
 class GCodeDispatch:
     error: type[CommandError]

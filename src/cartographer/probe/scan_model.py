@@ -14,6 +14,8 @@ from cartographer.probe.model import ModelSelectorMixin
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from numpy.typing import NDArray
+
     from cartographer.interfaces.printer import Sample
 
 
@@ -25,8 +27,8 @@ DEGREES = 9
 class TemperatureCompensationModel(Protocol):
     def compensate(self, frequency: float, temp_source: float, temp_target: float) -> float: ...
     def compensate_batch(
-        self, frequencies: np.ndarray, temp_sources: np.ndarray, temp_target: float
-    ) -> np.ndarray: ...
+        self, frequencies: NDArray[np.float64], temp_sources: NDArray[np.float64], temp_target: float
+    ) -> NDArray[np.float64]: ...
 
 
 class _NoTemperatureCompensationModel(TemperatureCompensationModel):
@@ -36,8 +38,8 @@ class _NoTemperatureCompensationModel(TemperatureCompensationModel):
 
     @override
     def compensate_batch(
-        self, frequencies: np.ndarray, temp_sources: np.ndarray, temp_target: float
-    ) -> np.ndarray:
+        self, frequencies: NDArray[np.float64], temp_sources: NDArray[np.float64], temp_target: float
+    ) -> NDArray[np.float64]:
         return frequencies
 
 
@@ -94,8 +96,8 @@ class ScanModel:
         )
 
     def frequency_to_distance_batch(
-        self, frequencies: np.ndarray, *, temperatures: np.ndarray
-    ) -> np.ndarray:
+        self, frequencies: NDArray[np.float64], *, temperatures: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
         """
         Vectorized frequency to distance conversion for arrays.
         """
@@ -117,7 +119,7 @@ class ScanModel:
 
         return self._eval(inverse_frequency) + self.config.z_offset
 
-    def _raw_frequency_to_distance_batch(self, frequencies: np.ndarray) -> np.ndarray:
+    def _raw_frequency_to_distance_batch(self, frequencies: NDArray[np.float64]) -> NDArray[np.float64]:
         """Vectorized version of _raw_frequency_to_distance."""
         lower_bound, upper_bound = self.config.domain
         inverse_frequencies = 1 / frequencies

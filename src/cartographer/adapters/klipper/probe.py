@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, final
 
 from extras import manual_probe
 
-from cartographer.adapters.klipper_like.utils import reraise_for_klipper
+from cartographer.adapters.klipper_like.utils import make_coord, reraise_for_klipper
 
 if TYPE_CHECKING:
     from gcode import GCodeCommand
@@ -22,10 +22,14 @@ class KlipperProbeSession:
 
     @reraise_for_klipper
     def run_probe(self, gcmd: GCodeCommand) -> None:
-        del gcmd
         pos = self.toolhead.get_position()
         trigger_pos = self._probe.perform_probe()
         self._results.append([pos.x, pos.y, trigger_pos])
+
+        # In new Klipper's _do_home_z_via_probe path, the gcmd contains HOME_ATTEMPT_NUM.
+        # This signals we're homing, so update _last_homing_time for Z_OFFSET_APPLY_PROBE.
+        if gcmd.get("HOME_ATTEMPT_NUM", None) is not None:
+            self._probe.note_homing_complete()
 
     def pull_probed_results(self):
         results = self._results
@@ -77,29 +81,31 @@ class KlipperCartographerProbe:
             return self.lift_speed
         return gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
 
-    def get_lift_speed(self, gcmd: GCodeCommand | None = None):
+    def get_lift_speed(self, gcmd: GCodeCommand | None = None) -> float:
         return self._get_lift_speed(gcmd)
 
-    def multi_probe_begin(self):
+    def multi_probe_begin(self) -> None:
         pass
 
-    def multi_probe_end(self):
+    def multi_probe_end(self) -> None:
         pass
 
-    def run_probe(self, gcmd):
-        """Run a single probe operation"""
+    def run_probe(self, gcmd: GCodeCommand):
+        """Legacy K2 probe entry point; always close the session."""
         session = self.start_probe_session(gcmd)
-        session.run_probe(gcmd)
-        results = session.pull_probed_results()
-        session.end_probe_session()
-        if results:
+        try:
+            session.run_probe(gcmd)
+            results = session.pull_probed_results()
+            if not results:
+                msg = "Cartographer probe returned no result"
+                raise gcmd.error(msg)
             return results[0]
-        return [0, 0, 0]
+        finally:
+            session.end_probe_session()
 
-    def probing_move(self, pos, speed):
+    def probing_move(self, pos: object, speed: float) -> None:
         """Compatibility shim - not used by Cartographer"""
         pass
-
 
     def get_probe_params(self, gcmd: GCodeCommand | None = None):
         return {
@@ -122,9 +128,7 @@ class KlipperCartographerProbe:
             "name": "cartographer",
             "last_query": 1 if self.query_probe_macro.last_triggered else 0,
             "last_z_result": round(self.probe_macro.last_trigger_position or 0, 6),
-            "last_probe_position": tuple(round(c, 6) for c in self.probe_macro.last_probe_position.as_tuple())
-            if self.probe_macro.last_probe_position is not None
-            else (0, 0, 0),
+            "last_probe_position": make_coord(self.probe_macro.last_probe_position),
         }
 
     def start_probe_session(self, gcmd: GCodeCommand) -> KlipperProbeSession:

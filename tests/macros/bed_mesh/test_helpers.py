@@ -17,6 +17,24 @@ from cartographer.macros.bed_mesh.helpers import (
 )
 
 
+@pytest.mark.parametrize("point", [(-0.5, 0.0), (10.5, 10.0), (0.0, -0.5), (10.0, 10.5)])
+def test_batch_keeps_samples_just_outside_mesh_edges(point: tuple[float, float]) -> None:
+    processor = SampleProcessor(MeshGrid((0.0, 0.0), (10.0, 10.0), 3, 3))
+    samples = [Sample(frequency=1000, time=0, position=Position(*point, 3), temperature=25, raw_count=100)]
+    scalar = processor.assign_samples_to_grid(samples, lambda _sample: 0.125)
+    batch = processor.assign_samples_to_grid_batch(samples, np.array([0.125]))
+    assert sum(result.sample_count for result in batch) == 1
+    assert [r.sample_count for r in batch] == [r.sample_count for r in scalar]
+    np.testing.assert_allclose([r.z for r in batch], [r.z for r in scalar], equal_nan=True)
+
+
+def test_batch_empty_samples_returns_empty_grid() -> None:
+    processor = SampleProcessor(MeshGrid((0.0, 0.0), (10.0, 10.0), 3, 3))
+    results = processor.assign_samples_to_grid_batch([], np.array([], dtype=float))
+    assert len(results) == 9
+    assert all(r.sample_count == 0 and np.isnan(r.z) for r in results)
+
+
 class TestMeshGrid:
     """Test cases for MeshGrid class."""
 
@@ -46,6 +64,20 @@ class TestMeshGrid:
 
         assert grid.x_step == 5.0
         assert grid.y_step == 5.0
+
+    def test_coords_are_cached(self):
+        """Test that x_coords/y_coords return the same object on repeated access."""
+        grid = MeshGrid((0.0, 0.0), (10.0, 10.0), 5, 5)
+        assert grid.x_coords is grid.x_coords
+        assert grid.y_coords is grid.y_coords
+
+    def test_coords_are_read_only(self):
+        """Test that cached coordinate arrays are immutable."""
+        grid = MeshGrid((0.0, 0.0), (10.0, 10.0), 5, 5)
+        with pytest.raises(ValueError, match="read-only"):
+            grid.x_coords[0] = 99.0
+        with pytest.raises(ValueError, match="read-only"):
+            grid.y_coords[0] = 99.0
 
     def test_generate_points(self):
         """Test point generation in correct order."""

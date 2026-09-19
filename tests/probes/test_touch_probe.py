@@ -21,9 +21,42 @@ def configure_probe(probe: Probe, config: Configuration) -> None:
             speed=3,
             threshold=1000,
             z_offset=0,
+            samples=5,
+            sample_range=0.010,
         )
     )
     probe.touch.load_model("test_touch")
+
+
+def test_touch_overrides_reach_homing_and_do_not_mutate_model(
+    mocker: MockerFixture,
+    toolhead: Toolhead,
+    probe: Probe,
+    mcu: Mcu,
+) -> None:
+    toolhead.get_position = mocker.Mock(return_value=Position(100, 100, 3))
+    mcu.start_homing_touch = mocker.Mock()
+
+    def touch(_endstop: object, speed: float) -> float:
+        assert speed == 1.5
+        probe.touch.home_start(1.0)
+        return 0.5
+
+    toolhead.z_probing_move = mocker.Mock(side_effect=touch)
+    assert probe.touch.perform_probe(threshold_override=2000, speed_override=1.5) == 0.5
+    assert all(call.args == (1.0, 2000) for call in mcu.start_homing_touch.call_args_list)
+    assert probe.touch.get_model().threshold == 1000
+    assert probe.touch.get_model().speed == 3
+    probe.touch.home_start(2.0)
+    mcu.start_homing_touch.assert_called_with(2.0, 1000)
+
+
+def test_phantom_triggers_consume_total_budget(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
+    toolhead.get_position = mocker.Mock(return_value=Position(100, 100, 3))
+    toolhead.z_probing_move = mocker.Mock(side_effect=[0.5] + [2.5] * 9)
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        probe.touch.perform_probe(max_samples=10)
+    assert toolhead.z_probing_move.call_count == 10
 
 
 def test_probe_success(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
@@ -42,9 +75,12 @@ def test_probe_includes_z_offset(
             speed=3,
             threshold=1000,
             z_offset=-0.5,
+            samples=5,
+            sample_range=0.010,
         )
     )
     probe.touch.load_model("test_touch")
+    toolhead.get_axis_limits = mocker.Mock(return_value=(-5, 100))
     toolhead.z_probing_move = mocker.Mock(return_value=-0.5)
     toolhead.get_position = mocker.Mock(return_value=Position(0, 0, 1))
 
@@ -112,10 +148,44 @@ def test_probe_unhomed_z(mocker: MockerFixture, toolhead: Toolhead, probe: Probe
         _ = probe.touch.perform_probe()
 
 
+@pytest.mark.parametrize("trigger_z", [-5.0, -4.999], ids=["exact_floor", "inclusive_boundary"])
+def test_floor_abort_retract_then_wait_raises(
+    mocker: MockerFixture, toolhead: Toolhead, probe: Probe, trigger_z: float
+) -> None:
+    """Retract queued after floor hit, wait_moves completes it, then RuntimeError raised."""
+    toolhead.get_axis_limits = mocker.Mock(return_value=(-5, 100))
+    toolhead.z_probing_move = mocker.Mock(return_value=trigger_z)
+    toolhead.get_position = mocker.Mock(
+        side_effect=[
+            Position(0, 0, 2),
+            Position(0, 0, 2),
+            Position(0, 0, trigger_z),
+        ]
+    )
+    move_counts: list[int] = []
+    move_spy = mocker.spy(toolhead, "move")
+    wait_spy = mocker.spy(toolhead, "wait_moves")
+    wait_spy.side_effect = lambda: move_counts.append(move_spy.call_count)
+
+    with pytest.raises(RuntimeError, match="movement floor"):
+        _ = probe.touch.perform_probe()
+
+    move_spy.assert_called_once_with(z=2, speed=5)
+    assert move_counts == [0, 0, 1]
+
+
 def test_home_wait(mocker: MockerFixture, mcu: Mcu, probe: Probe) -> None:
     mcu.stop_homing = mocker.Mock(return_value=1.5)
 
     assert probe.touch.home_wait(home_end_time=1.0) == 1.5
+
+
+def test_note_homing_complete_updates_last_homing_time(probe: Probe, toolhead: Toolhead) -> None:
+    assert probe.touch.last_homing_time == 0
+
+    probe.touch.note_homing_complete()
+
+    assert probe.touch.last_homing_time == toolhead.get_last_move_time() - 1
 
 
 def test_abort_if_current_extruder_too_hot(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
@@ -144,3 +214,44 @@ def test_probe_outside_bounds(mocker: MockerFixture, toolhead: Toolhead, probe: 
 
     with pytest.raises(RuntimeError, match="outside .* boundaries"):
         _ = probe.touch.home_start(0)
+
+
+def test_increased_budget_permits_longer_sequence(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
+    """An explicit max_samples override allows convergence that the config budget would exhaust.
+
+    With samples=5, max_noisy_samples=2 (window=7), and sample_range=0.010:
+    - 10 diverging values [1.0..1.9] prevent convergence within max_samples=10.
+    - Adding 5 more identical values (0.5) brings a clean 5-sample window at attempt 15,
+      which succeeds when the budget is raised to 15.
+    """
+    diverging = [round(1.0 + i * 0.1, 1) for i in range(10)]
+    converging = [0.5] * 5
+    side_effects = diverging + converging
+
+    toolhead.z_probing_move = mocker.Mock(side_effect=side_effects)
+    toolhead.get_position = mocker.Mock(return_value=Position(0, 0, 5))
+
+    # Default budget (max_samples=10) exhausts before convergence.
+    with pytest.raises(RuntimeError, match="Unable to find"):
+        _ = probe.touch.perform_probe()
+
+    # Reset the mock for the second run.
+    toolhead.z_probing_move = mocker.Mock(side_effect=side_effects)
+
+    # Raising the budget to 15 reaches the clean 5-sample window and succeeds.
+    result = probe.touch.perform_probe(max_samples=15)
+    assert result == 0.5
+
+
+def test_impossible_budget_fails_before_z_probing_move(mocker: MockerFixture, toolhead: Toolhead, probe: Probe) -> None:
+    """max_samples < effective_samples raises RuntimeError before any probing movement."""
+    toolhead.z_probing_move = mocker.Mock(return_value=0.5)
+    toolhead.get_position = mocker.Mock(return_value=Position(0, 0, 1))
+    move_spy = mocker.spy(toolhead, "move")
+
+    # effective samples = 5 (from config); passing max_samples=3 is impossible.
+    with pytest.raises(RuntimeError, match=r"max_samples \(3\) must be >= the effective samples \(5\)"):
+        _ = probe.touch.perform_probe(max_samples=3)
+
+    move_spy.assert_not_called()
+    toolhead.z_probing_move.assert_not_called()

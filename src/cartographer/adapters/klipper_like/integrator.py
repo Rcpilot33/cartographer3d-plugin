@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from abc import ABC
 from functools import wraps
 from textwrap import dedent
 from typing import TYPE_CHECKING, Callable, Protocol, Sequence, final
@@ -9,11 +8,17 @@ from typing import TYPE_CHECKING, Callable, Protocol, Sequence, final
 from gcode import GCodeCommand, GCodeDispatch
 from typing_extensions import override
 
-from cartographer.adapters.klipper.endstop import KlipperEndstop, KlipperHomingState
+from cartographer.adapters.klipper.endstop import (
+    KlipperEndstop,
+    KlipperEndstopBase,
+    KlipperHomingState,
+    KlipperProbeEndstop,
+)
 from cartographer.adapters.klipper.homing import KlipperHomingChip
 from cartographer.adapters.klipper.logging import setup_console_logger
 from cartographer.adapters.klipper.temperature import PrinterTemperatureCoil
 from cartographer.adapters.klipper_like.utils import reraise_for_klipper
+from cartographer.interfaces.errors import PrinterShutdownError
 from cartographer.interfaces.printer import Macro, MacroParams, SupportsFallbackMacro
 from cartographer.runtime.integrator import Integrator
 
@@ -24,17 +29,36 @@ if TYPE_CHECKING:
     from stepper import MCU_stepper
 
     from cartographer.adapters.klipper.configuration import KlipperConfiguration
-    from cartographer.adapters.klipper.mcu.mcu import KlipperCartographerMcu
-    from cartographer.core import MacroRegistration
-    from cartographer.interfaces.printer import Endstop
+    from cartographer.core import MacroRegistration, PrinterCartographer
+    from cartographer.interfaces.configuration import GeneralConfig
+    from cartographer.interfaces.printer import Endstop, ProbeMode, Toolhead
+    from cartographer.macros.probe import ProbeMacro, QueryProbeMacro
+    from cartographer.mcu.mcu import CartographerMcu
 
 logger = logging.getLogger(__name__)
 
 
+@final
+class _SensorConfigShim:
+    """Minimal shim satisfying heaters.register_sensor(config, ...) interface."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def get_name(self) -> str:
+        return self._name
+
+    def get(self, _option: str, default: str | None = None, **_kw: object) -> str | None:
+        return default
+
+
 class KlipperLikeAdapters(Protocol):
-    mcu: KlipperCartographerMcu
+    mcu: CartographerMcu
     printer: Printer
     config: KlipperConfiguration
+
+    @property
+    def toolhead(self) -> Toolhead: ...
 
 
 class _Rail(Protocol):
@@ -42,11 +66,18 @@ class _Rail(Protocol):
     def get_endstops(self) -> list[tuple[MCU_endstop, str]]: ...
 
 
-class KlipperLikeIntegrator(Integrator, ABC):
-    def __init__(self, adapters: KlipperLikeAdapters) -> None:
+@final
+class KlipperLikeIntegrator(Integrator):
+    def __init__(
+        self,
+        adapters: KlipperLikeAdapters,
+        target_probe_class: Callable[[Toolhead, ProbeMode, ProbeMacro, QueryProbeMacro, GeneralConfig], object],
+    ) -> None:
         self._config: KlipperConfiguration = adapters.config
         self._printer: Printer = adapters.printer
-        self._mcu: KlipperCartographerMcu = adapters.mcu
+        self._mcu: CartographerMcu = adapters.mcu
+        self._toolhead: Toolhead = adapters.toolhead
+        self._target_probe_class = target_probe_class
 
         self._gcode: GCodeDispatch = self._printer.lookup_object("gcode")
 
@@ -58,7 +89,13 @@ class KlipperLikeIntegrator(Integrator, ABC):
 
     @override
     def register_endstop_pin(self, chip_name: str, pin: str, endstop: Endstop) -> None:
-        mcu_endstop = KlipperEndstop(self._mcu, endstop)
+        # When registered as probe (chip_name == "probe"), expose get_position_endstop so
+        # new Klipper routes Z homing through the probe-session path. Otherwise, omit it
+        # so new Klipper falls through to the traditional MCU_endstop homing path.
+        if chip_name == "probe":
+            mcu_endstop = KlipperProbeEndstop(self._mcu, endstop)
+        else:
+            mcu_endstop = KlipperEndstop(self._mcu, endstop)
         chip = KlipperHomingChip(mcu_endstop, pin)
         self._printer.lookup_object("pins").register_chip(chip_name, chip)
 
@@ -73,7 +110,20 @@ class KlipperLikeIntegrator(Integrator, ABC):
             else:
                 logger.warning("No original macro found to fallback to for '%s'", name)
 
-        self._gcode.register_command(name, _catch_macro_errors(macro.run), desc=macro.description)
+        self._gcode.register_command(name, catch_macro_errors(macro.run), desc=macro.description)
+
+    @override
+    def register_probe(self, cartographer: PrinterCartographer) -> None:
+        self._printer.add_object(
+            "probe",
+            self._target_probe_class(
+                self._toolhead,
+                cartographer.scan_mode,
+                cartographer.probe_macro,
+                cartographer.query_probe_macro,
+                cartographer.config.general,
+            ),
+        )
 
     @override
     def register_coil_temperature_sensor(self) -> None:
@@ -82,7 +132,7 @@ class KlipperLikeIntegrator(Integrator, ABC):
 
         object_name = f"temperature_sensor {sensor.name}"
         self._printer.add_object(object_name, sensor)
-        pheaters.available_sensors.append(object_name)
+        pheaters.register_sensor(_SensorConfigShim(object_name), sensor)  # pyright: ignore[reportArgumentType]  # shim satisfies runtime interface
 
     @override
     def register_ready_callback(self, callback: Callable[[], None]) -> None:
@@ -90,32 +140,18 @@ class KlipperLikeIntegrator(Integrator, ABC):
 
     @reraise_for_klipper
     def _handle_home_rails_begin(self, homing: Homing, rails: Sequence[_Rail]) -> None:
-        """Check if Cartographer MCU is disconnected before Z homing begins."""
-        # Check if we're homing Z
-        if 2 not in homing.get_axes():
+        if not KlipperHomingState(homing).is_homing_z():
             return
-
-        # Check if any of the endstops is our KlipperEndstop
         for rail in rails:
             for endstop, _ in rail.get_endstops():
-                if isinstance(endstop, KlipperEndstop):
-                    # Check if the MCU is disconnected
-                    klipper_mcu = endstop.mcu.klipper_mcu
-                    is_disconnected = (
-                        hasattr(klipper_mcu, 'is_non_critical') and klipper_mcu.is_non_critical and
-                        hasattr(klipper_mcu, 'non_critical_disconnected') and klipper_mcu.non_critical_disconnected
-                    )
-                    if is_disconnected:
-                        mcu_name = klipper_mcu.get_name() if hasattr(klipper_mcu, 'get_name') else 'cartographer'
-                        raise RuntimeError(
-                            f"Cartographer MCU '{mcu_name}' is disconnected - cannot home Z axis"
-                        )
+                if isinstance(endstop, KlipperEndstopBase):
+                    endstop.mcu.ensure_connected()
 
     @reraise_for_klipper
     def _handle_home_rails_end(self, homing: Homing, rails: Sequence[_Rail]) -> None:
         homing_state = KlipperHomingState(homing)
         klipper_endstops = [
-            es.endstop for rail in rails for es, _ in rail.get_endstops() if isinstance(es, KlipperEndstop)
+            es.endstop for rail in rails for es, _ in rail.get_endstops() if isinstance(es, KlipperEndstopBase)
         ]
         for endstop in klipper_endstops:
             endstop.on_home_end(homing_state)
@@ -126,11 +162,14 @@ class KlipperLikeIntegrator(Integrator, ABC):
         handler.setLevel(log_level)
 
 
-def _catch_macro_errors(func: Callable[[GCodeCommand], None]) -> Callable[[GCodeCommand], None]:
+def catch_macro_errors(func: Callable[[GCodeCommand], None]) -> Callable[[GCodeCommand], None]:
     @wraps(func)
     def wrapper(gcmd: GCodeCommand) -> None:
         try:
             func(gcmd)
+        except PrinterShutdownError:
+            msg = "Aborted: printer entered shutdown"
+            raise gcmd.error(msg) from None
         except (RuntimeError, ValueError) as e:
             msg = dedent(str(e)).replace("\n", " ").replace("  ", "\n").strip()
             raise gcmd.error(msg) from e

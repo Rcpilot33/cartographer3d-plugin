@@ -32,13 +32,14 @@ logger = logging.getLogger(__name__)
 
 TOUCH_ACCEL = 100
 MAX_TOUCH_TEMPERATURE_EPSILON = 2
+_TOUCH_FLOOR_TOLERANCE = 0.001
 
 
 @dataclass(frozen=True)
 class TouchModeConfiguration:
     samples: int
     max_samples: int
-    max_window: int
+    max_noisy_samples: int
 
     x_offset: float
     y_offset: float
@@ -52,11 +53,11 @@ class TouchModeConfiguration:
     sample_range: float
 
     @staticmethod
-    def from_config(config: Configuration):
+    def from_config(config: Configuration) -> TouchModeConfiguration:
         return TouchModeConfiguration(
             samples=config.touch.samples,
             max_samples=config.touch.max_samples,
-            max_window=config.touch.samples + config.touch.max_noisy_samples,
+            max_noisy_samples=config.touch.max_noisy_samples,
             models=config.touch.models,
             x_offset=config.general.x_offset,
             y_offset=config.general.y_offset,
@@ -237,14 +238,31 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
     @override
     def perform_probe(
         self,
+        max_samples: int | None = None,
+        *,
         threshold_override: int | None = None,
         speed_override: float | None = None,
-        *,
         log_sequence_start: bool = True,
         log_touch_settings: bool = True,
     ) -> float:
+        if threshold_override is not None and threshold_override <= 0:
+            msg = "Threshold must be positive"
+            raise ValueError(msg)
+        if speed_override is not None and speed_override <= 0:
+            msg = "Speed must be positive"
+            raise ValueError(msg)
         if not self._toolhead.is_homed("z"):
             msg = "Z axis must be homed before probing"
+            raise RuntimeError(msg)
+
+        model = self.get_model()
+        effective_samples = model.samples
+        effective_max = max_samples if max_samples is not None else self._config.max_samples
+        if effective_max < effective_samples:
+            msg = (
+                f"max_samples ({effective_max}) must be >= the effective samples ({effective_samples}) "
+                f"required by the current model"
+            )
             raise RuntimeError(msg)
 
         if self._toolhead.get_position().z < self._config.retract_distance:
@@ -252,8 +270,9 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
         self._toolhead.wait_moves()
 
         self.last_z_result = self._run_probe(
-            threshold_override,
-            speed_override,
+            max_samples=max_samples,
+            threshold_override=threshold_override,
+            speed_override=speed_override,
             log_sequence_start=log_sequence_start,
             log_touch_settings=log_touch_settings,
         )
@@ -261,71 +280,58 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
 
     def _run_probe(
         self,
+        max_samples: int | None = None,
+        *,
         threshold_override: int | None = None,
         speed_override: float | None = None,
-        *,
         log_sequence_start: bool = True,
         log_touch_settings: bool = True,
     ) -> float:
-        if log_sequence_start:
-            logger.info(
-                "Starting touch sequence for %d samples within %d touches (window=%d)...",
-                self._config.samples,
-                self._config.max_samples,
-                self._config.max_window,
-            )
-
+        model = self.get_model()
+        samples = model.samples
+        sample_range = model.sample_range
+        effective_max = max_samples if max_samples is not None else self._config.max_samples
+        max_window = samples + self._config.max_noisy_samples
         if log_touch_settings:
-            model = self.get_model()
-            threshold = threshold_override if threshold_override is not None else model.threshold
-            speed = speed_override if speed_override is not None else model.speed
             logger.info(
-                "Touch settings: threshold %d%s, speed %.1f mm/s%s, z_offset %.3f mm",
-                threshold,
-                " (override)" if threshold_override is not None else " (model)",
-                speed,
-                " (override)" if speed_override is not None else " (model)",
+                "Touch settings: threshold %d, speed %.2f mm/s, z_offset %.3f mm",
+                threshold_override if threshold_override is not None else model.threshold,
+                speed_override if speed_override is not None else model.speed,
                 model.z_offset,
             )
+        previous: float | None = None
+        attempts = 0
 
-        collected: list[float] = []
+        def probe_sample() -> float:
+            nonlocal previous, attempts
+            # Rejected retract-distance triggers still consume the total touch budget.
+            while attempts < effective_max:
+                attempts += 1
+                if threshold_override is None and speed_override is None:
+                    value = self._perform_single_probe()
+                else:
+                    value = self._perform_single_probe(threshold_override, speed_override)
+                if previous is not None and abs(abs(value - previous) - self._config.retract_distance) < 0.01:
+                    logger.warning("Ignoring retract-distance phantom trigger at %.4f", value)
+                    continue
+                previous = value
+                return value
+            msg = "Unable to find consistent samples: touch budget exhausted after rejecting phantom triggers"
+            raise TouchError(msg)
 
-        def _probe_sample() -> float:
-            # Retry within a single touch slot when we detect a phantom trigger.
-            while True:
-                trigger_pos = self._perform_single_probe(threshold_override, speed_override)
-
-                # If a trigger lands exactly one retract distance from the previous sample,
-                # it is likely from the retract move and should be ignored.
-                if collected:
-                    last_sample = collected[-1]
-                    delta = abs(trigger_pos - last_sample)
-                    if abs(delta - self._config.retract_distance) < 0.01:
-                        logger.warning(
-                            "!! Phantom trigger ignored: %.4f (exactly +%.1fmm from previous %.4f)",
-                            trigger_pos,
-                            self._config.retract_distance,
-                            last_sample,
-                        )
-                        continue
-
-                collected.append(trigger_pos)
-                return trigger_pos
-
-        median = run_probe_sequence(
-            _probe_sample,
-            samples=self._config.samples,
-            max_samples=self._config.max_samples,
-            max_window=self._config.max_window,
-            sample_range=self._config.sample_range,
-            log_start=False,
+        return run_probe_sequence(
+            probe_sample,
+            samples=samples,
+            max_samples=effective_max,
+            max_window=max_window,
+            sample_range=sample_range,
+            log_start=log_sequence_start,
         )
-        return median
-    def _perform_single_probe(self, threshold_override: int | None = None, speed_override: float | None = None) -> float:
-        model = self.get_model()
-        self._threshold_override = threshold_override
-        probe_speed = speed_override if speed_override is not None else model.speed
 
+    def _perform_single_probe(
+        self, threshold_override: int | None = None, speed_override: float | None = None
+    ) -> float:
+        model = self.get_model()
         if self._toolhead.get_position().z < self._config.retract_distance:
             self._toolhead.move(z=self._config.retract_distance, speed=self._config.lift_speed)
         self._toolhead.wait_moves()
@@ -333,13 +339,15 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
         max_accel = self._toolhead.get_max_accel()
         self._toolhead.set_max_accel(TOUCH_ACCEL)
 
+        self._threshold_override = threshold_override
+        probe_speed = speed_override if speed_override is not None else model.speed
+
         # Wait for a single new sample
         # This seems to help avoid triggering prior to move
-        time = self._toolhead.get_last_move_time()
-        with self._mcu.start_session(lambda sample: sample.time >= time):
-            pass
-
         try:
+            time = self._toolhead.get_last_move_time()
+            with self._mcu.start_session(lambda sample: sample.time >= time):
+                pass
             trigger_pos = self._toolhead.z_probing_move(self, speed=probe_speed)
         finally:
             self._toolhead.set_max_accel(max_accel)
@@ -350,15 +358,21 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
             z=max(pos.z + self._config.retract_distance, self._config.retract_distance),
             speed=self._config.lift_speed,
         )
+
+        z_min, _ = self._toolhead.get_axis_limits("z")
+        if trigger_pos <= z_min + _TOUCH_FLOOR_TOLERANCE:
+            self._toolhead.wait_moves()
+            msg = f"Probe triggered at or near the Z movement floor (z={trigger_pos:.6f}, floor={z_min:.6f})"
+            raise RuntimeError(msg)
+
         return trigger_pos - model.z_offset
 
     @override
     def home_start(self, print_time: float) -> object:
         model = self.get_model()
-        # Use threshold override if set, otherwise use model threshold
-        threshold = getattr(self, '_threshold_override', None) or model.threshold
+        threshold = self._threshold_override if self._threshold_override is not None else model.threshold
         if threshold <= 0:
-            msg = "Threshold must be positive"
+            msg = "Threshold must positive"
             raise RuntimeError(msg)
 
         pos = self._toolhead.get_position()
@@ -381,6 +395,10 @@ class TouchMode(TouchModelSelectorMixin, ProbeMode, Endstop):
     def on_home_end(self, homing_state: HomingState) -> None:
         if not homing_state.is_homing_z():
             return
+        self._last_homing_time = self._toolhead.get_last_move_time()
+
+    @override
+    def note_homing_complete(self) -> None:
         self._last_homing_time = self._toolhead.get_last_move_time()
 
     @override

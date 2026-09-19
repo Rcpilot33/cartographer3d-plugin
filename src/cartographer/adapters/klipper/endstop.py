@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from reactor import ReactorCompletion
     from stepper import MCU_stepper
 
-    from cartographer.adapters.klipper.mcu.mcu import KlipperCartographerMcu
     from cartographer.interfaces.printer import Endstop
+    from cartographer.mcu.mcu import CartographerMcu
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +46,19 @@ class KlipperHomingState(HomingState):
         self.homing.set_homed_position([None, None, position])
 
 
-@final
-class KlipperEndstop(MCU_endstop):
-    def __init__(self, mcu: KlipperCartographerMcu, endstop: Endstop):
+class KlipperEndstopBase(MCU_endstop):
+    """Base endstop bridging the plugin's Endstop interface to Klipper's MCU_endstop."""
+
+    mcu: CartographerMcu
+    endstop: Endstop
+
+    def __init__(self, mcu: CartographerMcu, endstop: Endstop):
         self.mcu = mcu
         self.endstop = endstop
 
     @override
     def get_mcu(self) -> MCU:
-        return self.mcu.klipper_mcu
+        return self.mcu.host_mcu
 
     @override
     def add_stepper(self, stepper: MCU_stepper) -> None:
@@ -85,16 +89,30 @@ class KlipperEndstop(MCU_endstop):
     @override
     @reraise_for_klipper
     def query_endstop(self, print_time: float) -> int:
-        # If MCU is disconnected, report as not triggered 
-        klipper_mcu = self.mcu.klipper_mcu
-        is_disconnected = (
-            hasattr(klipper_mcu, 'is_non_critical') and klipper_mcu.is_non_critical and
-            hasattr(klipper_mcu, 'non_critical_disconnected') and klipper_mcu.non_critical_disconnected
-        )
-        if is_disconnected:
-            return 1 
+        if self.mcu.is_disconnected():
+            return 1
         return 1 if self.endstop.query_is_triggered(print_time) else 0
 
-    @override
+
+@final
+class KlipperProbeEndstop(KlipperEndstopBase):
+    """Endstop variant for register_as_probe: true.
+
+    Exposes get_position_endstop(), signaling to new Klipper (post-4767a8ed) that
+    Z homing should route through the probe-session path (_do_home_z_via_probe).
+    """
+
     def get_position_endstop(self) -> float:
         return self.endstop.get_endstop_position()
+
+
+@final
+class KlipperEndstop(KlipperEndstopBase):
+    """Plain endstop variant (register_as_probe: false, or internal probing moves).
+
+    Does NOT expose get_position_endstop(), so new Klipper falls through to the
+    traditional _do_home_rails path. This avoids a crash when no 'probe' object
+    is registered, or incorrect routing to a different probe.
+    """
+
+    pass

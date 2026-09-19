@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import numpy as np
 from typing_extensions import override
@@ -12,6 +12,8 @@ from cartographer.interfaces.printer import AxisTwistCompensation, Endstop, Homi
 from cartographer.probe.scan_model import ScanModelSelectorMixin, TemperatureCompensationModel
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
     from cartographer.interfaces.configuration import (
         Configuration,
         ScanModelConfiguration,
@@ -22,16 +24,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class Model(Protocol):
-    @property
-    def name(self) -> str: ...
-
-    @property
-    def z_offset(self) -> float: ...
-    def distance_to_frequency(self, distance: float) -> float: ...
-    def frequency_to_distance(self, frequency: float) -> float: ...
-
-
 TRIGGER_DISTANCE = 2.0
 
 
@@ -39,7 +31,6 @@ TRIGGER_DISTANCE = 2.0
 class ScanModeConfiguration:
     x_offset: float
     y_offset: float
-    travel_speed: float
     probe_speed: float
 
     samples: int
@@ -50,7 +41,6 @@ class ScanModeConfiguration:
         return ScanModeConfiguration(
             x_offset=config.general.x_offset,
             y_offset=config.general.y_offset,
-            travel_speed=config.general.travel_speed,
             probe_speed=config.scan.probe_speed,
             samples=config.scan.samples,
             models=config.scan.models,
@@ -93,18 +83,6 @@ class ScanMode(ScanModelSelectorMixin, ProbeMode, Endstop):
         self._axis_twist_compensation: AxisTwistCompensation | None = axis_twist_compensation
 
         self.last_z_result: float | None = None
-
-    def _check_mcu_disconnected(self) -> bool:
-        """Check if the MCU is disconnected n safe for non-critical MCU feature.
-        
-        """
-        # Access the underlying klipper_mcu if available (for KlipperCartographerMcu)
-        klipper_mcu = getattr(self._mcu, 'klipper_mcu', None)
-        if klipper_mcu is None:
-            return False
-        is_non_critical = hasattr(klipper_mcu, 'is_non_critical') and klipper_mcu.is_non_critical
-        is_disconnected = hasattr(klipper_mcu, 'non_critical_disconnected') and klipper_mcu.non_critical_disconnected
-        return is_non_critical and is_disconnected
 
     @override
     def get_compensation_model(self) -> TemperatureCompensationModel | None:
@@ -161,7 +139,7 @@ class ScanMode(ScanModelSelectorMixin, ProbeMode, Endstop):
         distances = self.calculate_sample_distance_batch(samples)
         return float(np.median(distances))
 
-    def calculate_sample_distance_batch(self, samples: list[Sample]) -> np.ndarray:
+    def calculate_sample_distance_batch(self, samples: list[Sample]) -> NDArray[np.float64]:
         model = self.get_model()
         frequencies = np.array([s.frequency for s in samples])
         temperatures = np.array([s.temperature for s in samples])
@@ -170,8 +148,6 @@ class ScanMode(ScanModelSelectorMixin, ProbeMode, Endstop):
     @override
     def query_is_triggered(self, print_time: float) -> bool:
         # If MCU is disconnected, report as not triggered (safe state)
-        if self._check_mcu_disconnected():
-            return False
         if not self.has_model():
             return True  # No model loaded, assume triggered
         distance = self.measure_distance(time=print_time)
@@ -199,6 +175,10 @@ class ScanMode(ScanModelSelectorMixin, ProbeMode, Endstop):
             raise RuntimeError(msg)
 
         homing_state.set_z_homed_position(distance)
+        self._last_homing_time = self._toolhead.get_last_move_time()
+
+    @override
+    def note_homing_complete(self) -> None:
         self._last_homing_time = self._toolhead.get_last_move_time()
 
     @override

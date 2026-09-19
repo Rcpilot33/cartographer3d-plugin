@@ -1,0 +1,27 @@
+# https://github.com/Klipper3d/klipper/blob/master/klippy/chelper/__init__.py
+
+from cffi import FFI
+
+class _FFILib:
+    """Minimal stub for the chelper FFI library object."""
+    def trdispatch_alloc(self) -> FFI.CData: ...
+    def trdispatch_mcu_alloc(
+        self,
+        td: FFI.CData,
+        serialqueue: FFI.CData,
+        command_queue: object,
+        oid: int,
+        timeout_tag: int,
+        trigger_tag: int,
+        state_tag: int,
+    ) -> FFI.CData: ...
+    def trdispatch_start(self, td: FFI.CData, reason: int) -> None: ...
+    def trdispatch_stop(self, td: FFI.CData) -> None: ...
+    def free(self, ptr: FFI.CData) -> None: ...
+
+class _FFIMain(FFI):
+    """Extended FFI with gc."""
+
+    ...
+
+def get_ffi() -> tuple[_FFIMain, _FFILib]: ...

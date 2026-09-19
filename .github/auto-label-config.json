@@ -3,15 +3,18 @@
     "fix",
     "enhancement",
     "chore",
-    "breaking change",
-    "ignore-for-release"
+    "breaking-change",
+    "ignore-for-release",
+    "performance"
   ],
   "titleMappings": {
     "fix": "fix",
     "feat": "enhancement",
-    "chore": "chore"
+    "chore": "chore",
+    "perf": "performance"
   },
   "releaseRelevantPaths": ["^src/", "^uv\\.lock$"],
   "breakingChangeIndicator": "!",
+  "breakingChangeLabel": "breaking-change",
   "ignoreForReleaseLabel": "ignore-for-release"
 }

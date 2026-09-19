@@ -1,18 +1,39 @@
 from __future__ import annotations
 
 from functools import wraps
-from typing import Callable, TypeVar
+from typing import TYPE_CHECKING, Callable, TypeVar
 
 from gcode import CommandError
+from gcode import Coord as GCodeCoord
 from typing_extensions import ParamSpec
 
-from cartographer.interfaces.errors import ProbeTriggerError
+from cartographer.interfaces.errors import PrinterShutdownError, ProbeTriggerError
+
+if TYPE_CHECKING:
+    from cartographer.interfaces.printer import Position
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 # Klipper error message for probe triggered before movement
 PROBE_TRIGGERED_BEFORE_MOVEMENT = "Probe triggered prior to movement"
+
+
+def make_coord(position: Position | None) -> GCodeCoord:
+    """Create a GCodeCoord from a Position, or a zero Coord if None.
+
+    Handles both old Klipper/Kalico (namedtuple with positional args)
+    and new Klipper (tuple subclass accepting a single iterable).
+    """
+    if position:
+        x, y, z = position.as_tuple()
+        t = (round(x, 6), round(y, 6), round(z, 6))
+    else:
+        t = (0, 0, 0)
+    try:
+        return GCodeCoord(t)
+    except TypeError:
+        return GCodeCoord(t[0], t[1], t[2], 0)
 
 
 def reraise_for_klipper(
@@ -30,6 +51,9 @@ def reraise_for_klipper(
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return func(*args, **kwargs)
+        except PrinterShutdownError:
+            msg = "Aborted: printer entered shutdown"
+            raise CommandError(msg) from None
         except RuntimeError as e:
             raise CommandError(str(e)) from e
 

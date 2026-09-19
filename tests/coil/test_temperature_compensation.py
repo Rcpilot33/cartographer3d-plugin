@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 
 from cartographer.coil.temperature_compensation import CoilTemperatureCompensationModel
 from cartographer.interfaces.configuration import CoilCalibrationConfiguration
+from cartographer.interfaces.printer import CoilCalibrationReference
 
 
 class _MockMcu:
-    def get_coil_reference(self):
-        return SimpleNamespace(min_frequency=1000.0, min_frequency_temperature=25.0)
+    def get_coil_reference(self) -> CoilCalibrationReference:
+        return CoilCalibrationReference(min_frequency=1000.0, min_frequency_temperature=25.0)
 
 
 def test_compensate_batch_matches_scalar() -> None:

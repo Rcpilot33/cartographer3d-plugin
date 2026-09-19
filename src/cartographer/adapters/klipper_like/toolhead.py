@@ -9,6 +9,7 @@ from extras.manual_probe import ManualProbeHelper
 from typing_extensions import override
 
 from cartographer.adapters.klipper.endstop import KlipperEndstop
+from cartographer.adapters.klipper_like.axis_compat import uses_string_homing_axes
 from cartographer.adapters.klipper_like.utils import reraise_from_klipper
 from cartographer.interfaces.printer import Endstop, HomingAxis, Position, TemperatureStatus, Toolhead
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from stepper import MCU_stepper
     from toolhead import ToolHead as KlippyToolhead
 
-    from cartographer.adapters.klipper.mcu.mcu import KlipperCartographerMcu
+    from cartographer.mcu.mcu import CartographerMcu
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,17 @@ def axis_to_index(axis: HomingAxis) -> int:
 
 @final
 class FakeRail:
-    def __init__(self, endstop: MCU_endstop) -> None:
+    def __init__(self, endstop: MCU_endstop, axis_range: tuple[float, float]) -> None:
         self.endstop = endstop
+        self.axis_range = axis_range
+
+    def get_range(self) -> tuple[float, float]:
+        return self.axis_range
+
+    def get_name(self, short: bool = False) -> str:
+        if short:
+            return "carto"
+        return "cartographer"
 
     def get_steppers(self) -> list[MCU_stepper]:
         return self.endstop.get_steppers()
@@ -59,12 +69,11 @@ class KlipperLikeToolhead(Toolhead, ABC):
     @property
     def _use_str_axes(self) -> bool:
         if self.__use_str_axes is None:
-            kin = self.toolhead.get_kinematics()
-            self.__use_str_axes = not hasattr(kin, "note_z_not_homed")
+            self.__use_str_axes = uses_string_homing_axes(self.toolhead)
         return self.__use_str_axes
 
-    def __init__(self, config: ConfigWrapper, mcu: KlipperCartographerMcu) -> None:
-        self.mcu: KlipperCartographerMcu = mcu
+    def __init__(self, config: ConfigWrapper, mcu: CartographerMcu) -> None:
+        self.mcu: CartographerMcu = mcu
         self.printer: Printer = config.get_printer()
 
     @override
@@ -115,7 +124,7 @@ class KlipperLikeToolhead(Toolhead, ABC):
         homing.set_axes([axis_to_index("z")])
         homing.trigger_mcu_pos = {sp.get_name(): sp.get_mcu_position() for sp in klipper_endstop.get_steppers()}
 
-        self.printer.send_event("homing:home_rails_end", homing, [FakeRail(klipper_endstop)])
+        self.printer.send_event("homing:home_rails_end", homing, [FakeRail(klipper_endstop, self.get_axis_limits("z"))])
 
     @override
     def set_z_position(self, z: float) -> None:

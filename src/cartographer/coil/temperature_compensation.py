@@ -11,6 +11,8 @@ from cartographer.coil.helpers import param_linear
 from cartographer.probe.scan_model import TemperatureCompensationModel
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
     from cartographer.interfaces.configuration import CoilCalibrationConfiguration
     from cartographer.interfaces.printer import CoilCalibrationReference
 
@@ -116,10 +118,10 @@ class CoilTemperatureCompensationModel(TemperatureCompensationModel):
 
     def compensate_batch(
         self,
-        frequencies: np.ndarray,
-        temp_sources: np.ndarray,
+        frequencies: NDArray[np.float64],
+        temp_sources: NDArray[np.float64],
         temp_target: float,
-    ) -> np.ndarray:
+    ) -> NDArray[np.float64]:
         """
         Vectorized temperature compensation for arrays of frequencies and temperatures.
 
@@ -135,10 +137,7 @@ class CoilTemperatureCompensationModel(TemperatureCompensationModel):
         temp_sq = temp_sources**2
 
         quad_a = (
-            4 * (temp_sources * self.a_a) ** 2
-            + 4 * temp_sources * self.a_a * self.b_a
-            + self.b_a**2
-            + 4 * self.a_a
+            4 * (temp_sources * self.a_a) ** 2 + 4 * temp_sources * self.a_a * self.b_a + self.b_a**2 + 4 * self.a_a
         )
 
         quad_b = (
