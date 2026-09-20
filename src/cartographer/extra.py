@@ -31,7 +31,17 @@ def load_config(config: object) -> object:
 
     register_reconnect = getattr(adapters.mcu, "register_reconnect_callback", None)
     if register_reconnect is not None:
-        register_reconnect(cartographer.validate_and_load_models)
+
+        def validate_reconnect() -> None:
+            cartographer.validate_and_load_models()
+            # Only the host adapter knows how its persistent UI warnings work.
+            # A missing version means validation was skipped, not successful.
+            if adapters.mcu.get_mcu_version() is not None:
+                on_validated = getattr(adapters, "on_reconnect_models_validated", None)
+                if on_validated is not None:
+                    on_validated()
+
+        register_reconnect(validate_reconnect)
 
     adapter_name = adapters.__class__.__name__
     logger.info("Loaded Cartographer3D Plugin version %s using %s", __version__, adapter_name)

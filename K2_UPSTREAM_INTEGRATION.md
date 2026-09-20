@@ -7,6 +7,14 @@ It includes all 41 upstream-only commits, not just selected mesh fixes.
 
 ## Compatibility work
 
+- After reconnect model validation/loading completes with a known MCU version,
+  the K2 adapter removes only the exact stale disconnected-startup runtime
+  warning and refreshes Klipper's warning status for Fluidd. Failed or skipped
+  validation does not clear it; model compatibility and other warnings remain.
+  Regression validation: 484 tests with Python 3.12/SciPy, 478 with Python 3.8
+  without SciPy (six SciPy-required tests deselected). Hardware UI verification
+  of automatic warning removal is still required.
+
 - K2 transport is isolated under `adapters/k2`. Runtime detection recognizes
   the patched K2 MCU reconnect API; Kalico detection still takes precedence.
 - Preserves K2's 8x Cartographer trsync timeouts, restoring the host globals even
