@@ -40,6 +40,13 @@ It includes all 41 upstream-only commits, not just selected mesh fixes.
 
 ## Automated validation
 
+Automatic removal of the disconnected startup warning uses the runtime-warning
+API supplied by the K2 `save-config-restart` `configfile.py` patch (or the
+equivalent Jacob host patch). This cosmetic cleanup is best-effort: hosts
+without that API retain the warning, and cleanup exceptions are logged without
+failing reconnect. Actual model-validation failures still propagate to the
+reconnect safety handler and can trigger shutdown.
+
 Using upstream's unchanged `uv.lock`:
 
 - Python 3.12 with SciPy: **479 tests passed**.

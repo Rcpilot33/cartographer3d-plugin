@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -25,6 +26,43 @@ def test_removes_only_matching_runtime_warnings_and_refreshes_status() -> None:
     host._rebuild_status_warnings.assert_called_once_with()
     clear_disconnected_warning(host)
     host._rebuild_status_warnings.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        object(),
+        SimpleNamespace(runtime_warnings=[]),
+        SimpleNamespace(_rebuild_status_warnings=lambda: None),
+        SimpleNamespace(runtime_warnings=[], _rebuild_status_warnings=None),
+        SimpleNamespace(runtime_warnings=None, _rebuild_status_warnings=lambda: None),
+    ],
+)
+def test_missing_host_warning_api_is_optional(host: object) -> None:
+    clear_disconnected_warning(host)
+
+
+def test_rebuild_failure_does_not_escape(mocker: MockerFixture, caplog: pytest.LogCaptureFixture) -> None:
+    rebuild = Mock(side_effect=RuntimeError("host rebuild failed"))
+    host = SimpleNamespace(
+        runtime_warnings=[{"type": "runtime_warning", "message": DISCONNECTED_WARNING}],
+        _rebuild_status_warnings=rebuild,
+    )
+    mocker.patch.dict(sys.modules, {"extras.thermistor": Mock(), "greenlet": Mock()})
+    extra = importlib.import_module("cartographer.extra")
+    adapters = Mock()
+    adapters.mcu.get_mcu_version.return_value = "5.1.0"
+    adapters.on_reconnect_models_validated.side_effect = lambda: clear_disconnected_warning(host)
+    cartographer = Mock()
+    cartographer.macros = []
+    _ = mocker.patch.object(extra, "init_runtime", return_value=(adapters, Mock()))
+    _ = mocker.patch.object(extra, "PrinterCartographer", return_value=cartographer)
+    _ = extra.load_config(Mock())
+    callback = adapters.mcu.register_reconnect_callback.call_args.args[0]
+    callback()
+    cartographer.validate_and_load_models.assert_called_once_with()
+    rebuild.assert_called_once_with()
+    assert "Unable to clear Cartographer disconnected warning" in caplog.text
 
 
 @pytest.mark.parametrize("version", [None, "5.1.0"])
