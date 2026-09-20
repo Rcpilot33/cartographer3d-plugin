@@ -47,6 +47,10 @@ class Session(Generic[T]):
         Raises McuDisconnectedError (or the stored abort error) if the session was aborted.
         """
         self._condition.wait_for(lambda: self._aborted or condition(self.items))
+        self.raise_if_aborted()
+
+    def raise_if_aborted(self) -> None:
+        """Nonblocking checkpoint; reconnect cannot revive an aborted session."""
         if self._aborted:
             if self._abort_error is not None:
                 raise self._abort_error

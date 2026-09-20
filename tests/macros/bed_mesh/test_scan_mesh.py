@@ -8,6 +8,7 @@ import pytest
 from typing_extensions import override
 
 from cartographer.interfaces.configuration import MeshPath
+from cartographer.interfaces.errors import McuDisconnectedError
 from cartographer.interfaces.printer import Position, Sample, Toolhead
 from cartographer.macros.bed_mesh.interfaces import BedMeshAdapter
 from cartographer.macros.bed_mesh.scan_mesh import BedMeshCalibrateConfiguration, BedMeshCalibrateMacro
@@ -101,6 +102,50 @@ class MockBedMeshAdapter(BedMeshAdapter):
 
 class TestBedMeshIntegration:
     """Integration tests for bed mesh calibration."""
+
+    @pytest.mark.parametrize("phase", ["before_move", "during_move", "drain"])
+    def test_aborted_scan_does_not_queue_more_moves_or_apply_mesh(
+        self,
+        mocker: MockerFixture,
+        bed_mesh_macro: BedMeshCalibrateMacro,
+        session: Session[Sample],
+        params: MockParams,
+        adapter: MockBedMeshAdapter,
+        toolhead: MockToolhead,
+        phase: str,
+    ) -> None:
+        aborted = session
+        move = mocker.spy(bed_mesh_macro, "_move_probe_to_point")
+        process = mocker.spy(bed_mesh_macro, "_process_samples_to_positions")
+        waits = 0
+
+        def wait() -> None:
+            nonlocal waits
+            waits += 1
+            if phase == "drain" and waits == 2:
+                aborted.abort(McuDisconnectedError())
+
+        mocker.patch.object(toolhead, "wait_moves", side_effect=wait)
+        if phase == "before_move":
+            aborted.abort(McuDisconnectedError())
+        elif phase == "during_move":
+            original_move = toolhead.move
+
+            def disconnecting_move(**kwargs: float) -> None:
+                original_move(**kwargs)
+                if move.call_count == 2:
+                    aborted.abort(McuDisconnectedError())
+
+            mocker.patch.object(toolhead, "move", side_effect=disconnecting_move)
+        params.params = {"METHOD": "scan", "RUNS": "2"}
+        with pytest.raises(McuDisconnectedError):
+            bed_mesh_macro.run(params)
+        if phase != "drain":
+            assert move.call_count == (1 if phase == "before_move" else 2)
+        else:
+            assert waits == 2  # initial positioning and first run, never second run
+        process.assert_not_called()
+        assert adapter.mesh_positions == []
 
     @pytest.fixture
     def probe_offset(self):

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cartographer.interfaces.configuration import Configuration, TouchModelConfiguration
+from cartographer.interfaces.errors import McuDisconnectedError
 from cartographer.interfaces.printer import Mcu, Position, TemperatureStatus, Toolhead
 
 if TYPE_CHECKING:
@@ -26,6 +27,20 @@ def configure_probe(probe: Probe, config: Configuration) -> None:
         )
     )
     probe.touch.load_model("test_touch")
+
+
+def test_touch_disconnect_aborts_sequence_without_retry_or_retract(
+    mocker: MockerFixture, toolhead: Toolhead, probe: Probe
+) -> None:
+    toolhead.get_position = mocker.Mock(return_value=Position(100, 100, 3))
+    move = mocker.patch.object(toolhead, "move")
+    probing = mocker.patch.object(toolhead, "z_probing_move", side_effect=McuDisconnectedError())
+    model = probe.touch.get_model()
+    with pytest.raises(McuDisconnectedError):
+        probe.touch.perform_probe()
+    probing.assert_called_once()
+    move.assert_not_called()
+    assert probe.touch.get_model() == model
 
 
 def test_touch_overrides_reach_homing_and_do_not_mutate_model(

@@ -40,6 +40,32 @@ It includes all 41 upstream-only commits, not just selected mesh fixes.
 
 ## Automated validation
 
+### Active-operation disconnect handling
+
+The V3 bounded Z150-to-Z50 touch diagnostic stopped promptly by operator
+observation on September 20, 2026. Its log showed homing had reached dispatch
+cleanup before the diagnostic's deliberate shutdown; querying the disconnected
+probe then prevented the old loop from cleaning up later MCU participants.
+This was not a measurement of stop latency or nozzle-contact safety.
+
+K2 dispatch cleanup now attempts every participant, skips serial queries to an
+already-disconnected MCU, and finalizes its local stepper state. Cleanup errors
+and communication timeouts shut the host down and propagate as failures:
+recovery requires the K2 protected restart procedure and rehoming, not another
+touch attempt with potentially stale coordinates. The host MCU patch must also
+be refreshed to skip shutdown commands to the disconnected non-critical MCU.
+This does not change trigger-sync timeout values or normal mid-print reconnect.
+
+Scan meshing now checks the session's latched abort before and after enqueueing
+each path point and after each run's motion drain. It stops issuing further
+points once the disconnect is observed; queued moves can still finish. This
+is not an emergency stop, does not impose a hardware stop-time bound, and does
+not revive a failed session when the probe reconnects. Failed scans do not
+proceed to mesh processing/application.
+
+These fixes require protected host reload and a repeat of the bounded hardware
+test before hardware sign-off. Do not test against the nozzle/bed.
+
 Automatic removal of the disconnected startup warning uses the runtime-warning
 API supplied by the K2 `save-config-restart` `configfile.py` patch (or the
 equivalent Jacob host patch). This cosmetic cleanup is best-effort: hosts

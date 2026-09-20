@@ -7,7 +7,7 @@ from typing import Callable
 import pytest
 from typing_extensions import override
 
-from cartographer.interfaces.errors import PrinterShutdownError
+from cartographer.interfaces.errors import McuDisconnectedError, PrinterShutdownError
 from cartographer.stream import Condition, Stream
 
 
@@ -38,6 +38,16 @@ def stream() -> Stream[object]:
 
 
 class TestStream:
+    def test_abort_checkpoint_retains_failure_after_more_samples(self, stream: Stream[object]) -> None:
+        with stream.start_session() as session:
+            session.raise_if_aborted()
+            failure = McuDisconnectedError()
+            session.abort(failure)
+            stream.add_item(42)
+            with pytest.raises(McuDisconnectedError) as caught:
+                session.raise_if_aborted()
+            assert caught.value is failure
+
     def test_start_session(self, stream: Stream[object]) -> None:
         with stream.start_session() as session:
             stream.add_item(42)

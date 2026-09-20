@@ -177,8 +177,8 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
 
     @override
     def stop_homing(self, home_end_time: float) -> float:
-        self.dispatch.wait_end(home_end_time)
         try:
+            self.dispatch.wait_end(home_end_time)
             if not self.is_disconnected():
                 self.commands.send_stop_home()
         finally:

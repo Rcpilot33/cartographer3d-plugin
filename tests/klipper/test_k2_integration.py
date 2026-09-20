@@ -144,6 +144,105 @@ def test_stop_homing_still_disarms_after_disconnect(carto_mcu: type) -> None:
     platform.create_trigger_dispatch.return_value.stop.assert_called_once()
 
 
+def test_stop_homing_disarms_even_when_wait_fails(carto_mcu: type) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = True
+    failure = McuDisconnectedError()
+    dispatch = platform.create_trigger_dispatch.return_value
+    dispatch.wait_end.side_effect = failure
+    mcu = carto_mcu(platform, Mock())
+    with pytest.raises(McuDisconnectedError) as caught:
+        mcu.stop_homing(1.0)
+    assert caught.value is failure
+    dispatch.stop.assert_called_once()
+
+
+@pytest.mark.parametrize("failure_index", [0, 1])
+@pytest.mark.parametrize("already_disconnected", [False, True])
+def test_k2_stop_cleans_every_participant_after_failure(
+    k2_module: ModuleType, mocker: MockerFixture, failure_index: int, already_disconnected: bool
+) -> None:
+    ffi = Mock()
+    mocker.patch("chelper.get_ffi", return_value=(Mock(), ffi))
+    dispatch = k2_module.K2TriggerDispatch(Mock())
+    dispatch._trdispatch = object()
+    participants = [Mock(), Mock(), Mock()]
+    dispatch._trsyncs = participants
+    for participant in participants:
+        participant.get_mcu().non_critical_disconnected = False
+        participant.stop.return_value = 1
+        participant.get_steppers.return_value = [Mock(), Mock()]
+    failed = participants[failure_index]
+    failure = RuntimeError("serial closed during stop")
+    failed.get_mcu().non_critical_disconnected = already_disconnected
+    failed.stop.side_effect = failure
+    expected_error = McuDisconnectedError if already_disconnected else RuntimeError
+    with pytest.raises(expected_error) as caught:
+        dispatch.stop()
+    if not already_disconnected:
+        assert caught.value is failure
+    else:
+        failed.stop.assert_not_called()
+    for index, participant in enumerate(participants):
+        if index != failure_index:
+            participant.stop.assert_called_once()
+    for stepper in failed.get_steppers():
+        stepper.note_homing_end.assert_called_once()
+    assert failed._trigger_completion is None
+    failed.get_mcu().register_response.assert_called_once_with(None, "trsync_state", failed.get_oid())
+    participants[0].get_mcu().get_printer().invoke_shutdown.assert_called_once()
+    ffi.trdispatch_stop.assert_called_once_with(dispatch._trdispatch)
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_k2_stop_keeps_success_and_timeout_distinct(
+    k2_module: ModuleType, mocker: MockerFixture, timeout: bool
+) -> None:
+    mocker.patch("chelper.get_ffi", return_value=(Mock(), Mock()))
+    mocker.patch.object(sys.modules["mcu"].MCU_trsync, "REASON_COMMS_TIMEOUT", 2)
+    dispatch = k2_module.K2TriggerDispatch(Mock())
+    dispatch._trdispatch = object()
+    dispatch._trsyncs = [Mock(), Mock()]
+    for participant in dispatch._trsyncs:
+        participant.get_mcu().non_critical_disconnected = False
+        participant.stop.return_value = 1
+    dispatch._trsyncs[1].stop.return_value = 2 if timeout else 3
+    if timeout:
+        with pytest.raises(RuntimeError, match="Communication timeout"):
+            dispatch.stop()
+        dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_called_once()
+    else:
+        assert dispatch.stop() == 1
+        dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_not_called()
+    for participant in dispatch._trsyncs:
+        participant.stop.assert_called_once()
+
+
+def test_k2_stop_attempts_all_cleanup_even_after_ffi_and_local_failures(
+    k2_module: ModuleType, mocker: MockerFixture
+) -> None:
+    ffi = Mock()
+    failure = RuntimeError("ffi stop failed")
+    ffi.trdispatch_stop.side_effect = failure
+    mocker.patch("chelper.get_ffi", return_value=(Mock(), ffi))
+    dispatch = k2_module.K2TriggerDispatch(Mock())
+    dispatch._trdispatch = object()
+    dispatch._trsyncs = [Mock(), Mock()]
+    for participant in dispatch._trsyncs:
+        participant.get_mcu().non_critical_disconnected = False
+        participant.stop.side_effect = RuntimeError("serial failure")
+        participant.get_mcu().register_response.side_effect = RuntimeError("unregister failure")
+        participant.get_steppers.return_value = [Mock(), Mock()]
+        participant.get_steppers()[0].note_homing_end.side_effect = RuntimeError("stepper failure")
+    with pytest.raises(RuntimeError) as caught:
+        dispatch.stop()
+    assert caught.value is failure
+    for participant in dispatch._trsyncs:
+        participant.stop.assert_called_once()
+        for stepper in participant.get_steppers():
+            stepper.note_homing_end.assert_called_once()
+
+
 @pytest.mark.parametrize("active_session", [False, True])
 def test_disconnected_session_entry_rejected_and_reconnect_allowed(
     carto_mcu: type,

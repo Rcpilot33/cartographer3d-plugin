@@ -63,6 +63,7 @@ class MCU:
     def get_constant_float(self, name: str, default: None) -> float | None: ...
 
 class MCU_trsync:
+    _trigger_completion: ReactorCompletion | None
     _trdispatch: FFI.CData
     _trdispatch_mcu: FFI.CData
     REASON_ENDSTOP_HIT: int

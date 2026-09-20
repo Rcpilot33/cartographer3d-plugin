@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import chelper
@@ -7,8 +8,12 @@ import mcu
 from mcu import TriggerDispatch
 from typing_extensions import override
 
+from cartographer.interfaces.errors import McuDisconnectedError
+
 if TYPE_CHECKING:
     from reactor import ReactorCompletion
+
+logger = logging.getLogger(__name__)
 
 
 class K2TriggerDispatch(TriggerDispatch):
@@ -25,6 +30,47 @@ class K2TriggerDispatch(TriggerDispatch):
         finally:
             mcu.TRSYNC_TIMEOUT = old_timeout
             mcu.TRSYNC_SINGLE_MCU_TIMEOUT = old_single_timeout
+
+    @override
+    def stop(self) -> int:
+        """Disarm every participant even if the probe's serial connection is gone."""
+        _, ffi_lib = chelper.get_ffi()
+        failure: Exception | None = None
+        results: list[int] = []
+        try:
+            ffi_lib.trdispatch_stop(self._trdispatch)
+        except Exception as exc:
+            failure = exc
+        for trsync in self._trsyncs:
+            host = trsync.get_mcu()
+            try:
+                if getattr(host, "non_critical_disconnected", False) is True:
+                    raise McuDisconnectedError()
+                results.append(trsync.stop())
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+                # The host stop method queries serial before notifying its
+                # steppers. Finish local cleanup even when that query fails.
+                trsync._trigger_completion = None
+                try:
+                    host.register_response(None, "trsync_state", trsync.get_oid())
+                except Exception:
+                    logger.exception("Failed to unregister K2 trigger-sync response")
+                for stepper in trsync.get_steppers():
+                    try:
+                        stepper.note_homing_end()
+                    except Exception:
+                        logger.exception("Failed to finalize K2 stepper homing state")
+        if failure is None and mcu.MCU_trsync.REASON_COMMS_TIMEOUT in results:
+            failure = RuntimeError("Communication timeout during homing")
+        if failure is not None:
+            # HomingMove cannot reconcile halted positions after home_wait
+            # raises. Do not leave the printer Ready with stale coordinates.
+            printer = self._trsyncs[0].get_mcu().get_printer()
+            printer.invoke_shutdown("Cartographer homing communication/cleanup failure; restart and rehome")
+            raise failure
+        return results[0]
 
     def reinit_after_reconnect(self) -> None:
         """Rebind the existing trsync OIDs to the new serialqueue."""

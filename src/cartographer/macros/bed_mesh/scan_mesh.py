@@ -311,10 +311,13 @@ class BedMeshCalibrateMacro(Macro, SupportsFallbackMacro):
             for run_index in range(params.runs):
                 sequence = path if run_index % 2 == 0 else reversed(path)
                 for point in sequence:
+                    session.raise_if_aborted()
                     self._move_probe_to_point(point, params.speed)
+                    session.raise_if_aborted()
 
                 self.toolhead.dwell(0.250)
                 self.toolhead.wait_moves()
+                session.raise_if_aborted()
 
             # Wait for final samples
             move_time = self.toolhead.get_last_move_time()
