@@ -4,6 +4,7 @@ virtual-*/
 build/
 .pdm-build/
 __pycache__/
+*.pyc
 .env
 .mise.local.toml
 .pdm-python
