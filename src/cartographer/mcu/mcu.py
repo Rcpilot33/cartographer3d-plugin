@@ -177,12 +177,25 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
 
     @override
     def stop_homing(self, home_end_time: float) -> float:
-        try:
-            self.dispatch.wait_end(home_end_time)
-            if not self.is_disconnected():
-                self.commands.send_stop_home()
-        finally:
-            result = self.dispatch.stop()
+        if getattr(self.dispatch, "stop_before_mcu_homing_disarm", False):
+            # K2 V4 firmware stops replying to trigger-sync queries after
+            # cartographer_stop_home.  Capture and finalize every MCU's
+            # trigger result while Cartographer is still responsive, then
+            # disarm its local homing state.  A genuine disconnect still
+            # raises from dispatch.stop() and follows the K2 shutdown path.
+            try:
+                self.dispatch.wait_end(home_end_time)
+            finally:
+                result = self.dispatch.stop()
+            self.ensure_connected()
+            self.commands.send_stop_home()
+        else:
+            try:
+                self.dispatch.wait_end(home_end_time)
+                if not self.is_disconnected():
+                    self.commands.send_stop_home()
+            finally:
+                result = self.dispatch.stop()
         self.ensure_connected()
         if result == MCU_trsync.REASON_COMMS_TIMEOUT:
             msg = "Communication timeout during homing"

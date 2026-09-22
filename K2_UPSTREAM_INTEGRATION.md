@@ -42,6 +42,15 @@ It includes all 41 upstream-only commits, not just selected mesh fixes.
 
 ### Active-operation disconnect handling
 
+The September 22, 2026 `SAFE_MOVE_Z` wrench test produced a valid scan trigger
+and stopped both K2 Z steppers, but exposed a V4 6.0.0 cleanup-order problem.
+The firmware stopped servicing trigger-sync traffic after
+`cartographer_stop_home`; the host then timed out while trying to finalize the
+already-stopped multi-MCU move and correctly shut Klipper down. On K2 only,
+trigger dispatch is now finalized while Cartographer is still responsive and
+the firmware homing state is disarmed afterward. A real disconnect during
+dispatch cleanup still follows the shutdown-and-rehome path.
+
 The V3 bounded Z150-to-Z50 touch diagnostic stopped promptly by operator
 observation on September 20, 2026. Its log showed homing had reached dispatch
 cleanup before the diagnostic's deliberate shutdown; querying the disconnected
@@ -100,9 +109,16 @@ No printer configuration or firmware was changed by this integration.
    Confirm logs select the K2 environment and models load.
 3. Verify guarded homing and normal homing under supervision. Never use a hand
    or another body part to test collision protection.
-4. Check scan/touch calibration, repeated single-run meshes at unchanged
+4. Send a print with deliberately unhomed axes. Confirm no guarded bed-upward
+   move uses an untrusted Z coordinate, normal homing runs first, and a
+   disconnected Cartographer blocks the final Z-homing stage.
+5. Retest a normal `SAFE_MOVE_Z`, then one controlled unexpected scan trigger.
+   The trigger must latch the stop, abort preparation without resuming when the
+   object is removed, and leave Klipper running. A genuine active disconnect
+   must still require protected restart and rehoming.
+6. Check scan/touch calibration, repeated single-run meshes at unchanged
    temperature and scan settings, start-print, and cancellation.
-5. Keep firmware updates separate so any behavior change can be attributed
+7. Keep firmware updates separate so any behavior change can be attributed
    to the plugin or firmware independently.
 
 Do not promote this branch to main or change the normal installer target until

@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 class K2TriggerDispatch(TriggerDispatch):
     """Keep the K2 fork's transport timeouts local to each dispatch start."""
 
+    # V4 firmware stops servicing trigger-sync traffic as soon as it receives
+    # cartographer_stop_home.  Finalize the cross-MCU dispatch first so the Z
+    # steppers retain the real trigger position instead of timing out during
+    # the subsequent cleanup query.
+    stop_before_mcu_homing_disarm: bool = True
+
     @override
     def start(self, print_time: float) -> ReactorCompletion:
         old_timeout = mcu.TRSYNC_TIMEOUT

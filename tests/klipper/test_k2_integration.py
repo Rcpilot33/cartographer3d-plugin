@@ -157,6 +157,42 @@ def test_stop_homing_disarms_even_when_wait_fails(carto_mcu: type) -> None:
     dispatch.stop.assert_called_once()
 
 
+def test_k2_valid_trigger_finalizes_dispatch_before_disarming_firmware(
+    carto_mcu: type, mocker: MockerFixture
+) -> None:
+    mocker.patch.object(sys.modules["mcu"].MCU_trsync, "REASON_ENDSTOP_HIT", 1)
+    order: list[str] = []
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    dispatch = platform.create_trigger_dispatch.return_value
+    dispatch.stop_before_mcu_homing_disarm = True
+    dispatch.wait_end.side_effect = lambda _time: order.append("wait")
+    dispatch.stop.side_effect = lambda: order.append("dispatch") or 1
+    mcu = carto_mcu(platform, Mock())
+    mcu._commands = Mock()
+    mcu._commands.send_stop_home.side_effect = lambda: order.append("firmware")
+
+    assert mcu.stop_homing(1.0) == 1.0
+    assert order == ["wait", "dispatch", "firmware"]
+
+
+def test_k2_disconnect_during_trigger_cleanup_never_disarms_after_failed_dispatch(carto_mcu: type) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    dispatch = platform.create_trigger_dispatch.return_value
+    dispatch.stop_before_mcu_homing_disarm = True
+    failure = McuDisconnectedError()
+    dispatch.stop.side_effect = failure
+    mcu = carto_mcu(platform, Mock())
+    mcu._commands = Mock()
+
+    with pytest.raises(McuDisconnectedError) as caught:
+        mcu.stop_homing(1.0)
+
+    assert caught.value is failure
+    mcu._commands.send_stop_home.assert_not_called()
+
+
 @pytest.mark.parametrize("failure_index", [0, 1])
 @pytest.mark.parametrize("already_disconnected", [False, True])
 def test_k2_stop_cleans_every_participant_after_failure(
