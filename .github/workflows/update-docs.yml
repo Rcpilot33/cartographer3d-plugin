@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   update-docs:
-    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    # The credentials and destination repository are owned by the upstream
+    # project. Keep the workflow for upstream merges, but skip it in forks.
+    if: >-
+      github.repository == 'Cartographer3D/cartographer3d-plugin' &&
+      (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout plugin

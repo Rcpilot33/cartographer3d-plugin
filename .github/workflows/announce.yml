@@ -7,6 +7,9 @@ permissions: {}
 
 jobs:
   github-releases-to-discord:
+    # This workflow belongs to the upstream project's Discord infrastructure.
+    # Keep it for clean upstream merges, but never run it from a fork.
+    if: github.repository == 'Cartographer3D/cartographer3d-plugin'
     runs-on: ubuntu-latest
     env:
       AVATAR_URL: "https://cdn.discordapp.com/icons/1165274913624572014/05a538c8bbb0d5da3b3755f5ba1ca32a.png"
