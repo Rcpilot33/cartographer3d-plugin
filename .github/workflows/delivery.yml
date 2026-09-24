@@ -9,6 +9,9 @@ permissions: {}
 
 jobs:
   build:
+    # Forks retain this upstream workflow for easier syncing, but must never
+    # publish the official cartographer3d-plugin package or create a release.
+    if: github.repository == 'Cartographer3D/cartographer3d-plugin'
     name: Build distribution
     runs-on: ubuntu-latest
     permissions:
