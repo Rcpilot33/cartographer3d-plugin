@@ -306,3 +306,43 @@ def test_disconnected_session_entry_rejected_and_reconnect_allowed(
     with mcu.start_session() as recovered:
         assert recovered.get_items() == []
     assert start_streaming.call_count == int(active_session) + 1
+
+
+def test_reconnect_stops_stale_stream_before_callbacks(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    mcu = carto_mcu(platform, Mock())
+    order: list[str] = []
+    mocker.patch.object(mcu, "stop_streaming", side_effect=lambda: order.append("stop"))
+    mcu.register_reconnect_callback(lambda: order.append("callback"))
+
+    platform.register_lifecycle_handlers.call_args.kwargs["on_reconnect"]()
+
+    assert order == ["stop", "callback"]
+    platform.invoke_shutdown.assert_not_called()
+
+
+def test_reconnect_stream_reset_failure_blocks_callbacks(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    mcu = carto_mcu(platform, Mock())
+    callback = Mock()
+    failure = RuntimeError("stream reset failed")
+    mocker.patch.object(mcu, "stop_streaming", side_effect=failure)
+    mcu.register_reconnect_callback(callback)
+
+    platform.register_lifecycle_handlers.call_args.kwargs["on_reconnect"]()
+
+    callback.assert_not_called()
+    platform.invoke_shutdown.assert_called_once_with("Cartographer MCU reconnect failed: stream reset failed")
+
+
+def test_disconnect_disables_immediate_processing(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    mcu = carto_mcu(platform, Mock())
+    set_immediate = mocker.patch.object(mcu._async_processor, "set_immediate")
+
+    platform.register_lifecycle_handlers.call_args.kwargs["on_disconnect"]()
+
+    set_immediate.assert_called_once_with(False)

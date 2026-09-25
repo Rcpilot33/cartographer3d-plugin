@@ -261,6 +261,15 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
 
     def _handle_reconnect(self) -> None:
         logger.info("Cartographer MCU reconnected")
+        try:
+            # A USB disconnect can re-enumerate without resetting the sensor
+            # MCU.  Explicitly disable any stream that survived the link loss
+            # before model callbacks or new sessions use the connection.
+            self.stop_streaming()
+        except Exception as e:
+            logger.exception("Failed to reset Cartographer stream after reconnect")
+            self._platform.invoke_shutdown(f"Cartographer MCU reconnect failed: {e}")
+            return
         for callback in self._reconnect_callbacks:
             try:
                 callback()
@@ -272,6 +281,9 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
     def _handle_disconnect(self) -> None:
         logger.warning("Cartographer MCU disconnected")
         self._sensor_ready = False
+        # Stop high-rate host processing immediately.  The MCU command cannot
+        # be sent while disconnected; reconnect performs the hardware reset.
+        self._async_processor.set_immediate(False)
         self._stream.abort_all_sessions(McuDisconnectedError())
 
     def _handle_data(self, data: _RawData) -> None:
