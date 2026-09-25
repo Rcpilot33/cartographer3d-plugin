@@ -263,6 +263,7 @@ class TestSampleProcessor:
 
         result_00 = next(r for r in results if r.point == (0.0, 0.0))
         assert result_00.sample_count == 2
+        assert result_00.nonfinite_sample_count == 1
         assert result_00.z == 1.5
 
 
