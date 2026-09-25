@@ -29,7 +29,7 @@ commit_id: COMMIT_ID
 __commit_id__: COMMIT_ID
 
 try:
-    from cartographer._version import (
+    from cartographer._version import (  # pyright: ignore[reportMissingImports]
         __commit_id__,
         __version__,
         __version_tuple__,
