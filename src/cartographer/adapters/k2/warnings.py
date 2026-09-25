@@ -17,6 +17,10 @@ class RuntimeWarnings(Protocol):
     def _rebuild_status_warnings(self) -> None: ...
 
 
+class PrinterObjects(Protocol):
+    def lookup_object(self, name: str) -> object: ...
+
+
 def clear_disconnected_warning(configfile: object) -> None:
     """Best-effort removal of the stale startup warning, never blocking reconnect."""
     try:
@@ -36,3 +40,14 @@ def clear_disconnected_warning(configfile: object) -> None:
     except Exception:
         # Cosmetic host integration must not turn a successful reconnect into shutdown.
         logger.warning("Unable to clear Cartographer disconnected warning", exc_info=True)
+
+
+def clear_disconnected_warning_from_printer(printer: object) -> None:
+    """Look up and clear the warning without allowing host API failures to escape."""
+    try:
+        host = cast("PrinterObjects", printer)
+        configfile = host.lookup_object("configfile")
+        clear_disconnected_warning(configfile)
+    except Exception:
+        # Warning cleanup is cosmetic and must never invalidate recovery.
+        logger.warning("Unable to access K2 runtime warnings after Cartographer reconnect", exc_info=True)

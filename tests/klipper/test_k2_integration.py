@@ -114,6 +114,38 @@ def test_reconnect_rebuilds_before_callbacks_and_blocks_failure(
     assert platform.is_disconnected() is failure
 
 
+def test_reconnect_event_while_host_still_disconnected_blocks_finalization(
+    k2_module: ModuleType,
+    mocker: MockerFixture,
+) -> None:
+    config = Mock()
+    host = Mock(is_non_critical=True, non_critical_disconnected=True)
+    host.get_non_critical_reconnect_event_name.return_value = "reconnected"
+    host.get_non_critical_disconnect_event_name.return_value = "disconnected"
+    mocker.patch("cartographer.adapters.klipper_like.mcu_platform._mcu_module.get_printer_mcu", return_value=host)
+    platform = k2_module.K2McuPlatform(config, "cartographer")
+    events: dict[str, object] = {}
+    config.get_printer().register_event_handler.side_effect = events.__setitem__
+    configure = Mock()
+    reconnect = Mock()
+    platform.register_config_callback(configure)
+    platform.register_lifecycle_handlers(
+        on_identify=Mock(),
+        on_connect=Mock(),
+        on_shutdown=Mock(),
+        on_reconnect=reconnect,
+        on_disconnect=Mock(),
+    )
+
+    callback = events["reconnected"]
+    assert callable(callback)
+    callback()
+
+    configure.assert_not_called()
+    reconnect.assert_not_called()
+    assert platform.is_disconnected() is True
+
+
 @pytest.mark.parametrize("mode", ["scan", "touch"])
 def test_disconnected_homing_never_arms_dispatch(carto_mcu: type, mode: str) -> None:
     platform = Mock()
