@@ -130,6 +130,8 @@ class ScanMode(ScanModelSelectorMixin, ProbeMode, Endstop):
     def measure_distance(
         self, *, time: float | None = None, min_sample_count: int | None = None, skip_count: int = 5
     ) -> float:
+        # Fail before opening a stream when calibration has not loaded a model.
+        self.get_model()
         min_sample_count = min_sample_count or self._config.samples
         time = time or self._toolhead.get_last_move_time()
 

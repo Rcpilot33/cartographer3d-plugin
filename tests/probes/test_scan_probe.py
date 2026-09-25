@@ -65,6 +65,20 @@ def test_skips_samples(probe: Probe, session: Session[Sample]):
     assert distance == pytest.approx(8)  # pyright:ignore[reportUnknownMemberType]
 
 
+def test_measure_distance_without_model_fails_before_stream(
+    probe: Probe,
+    mcu: Mcu,
+    mocker: MockerFixture,
+) -> None:
+    model_check = mocker.patch.object(probe.scan, "get_model", side_effect=RuntimeError("Scan model not loaded."))
+
+    with pytest.raises(RuntimeError, match="Scan model not loaded"):
+        probe.scan.measure_distance()
+
+    model_check.assert_called_once_with()
+    mcu.start_session.assert_not_called()
+
+
 def test_probe_errors_when_not_homed(probe: Probe, toolhead: Toolhead):
     toolhead.is_homed = lambda axis: False
 
