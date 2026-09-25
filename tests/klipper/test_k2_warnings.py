@@ -8,7 +8,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from cartographer.adapters.k2.warnings import DISCONNECTED_WARNING, clear_disconnected_warning
+from cartographer.adapters.k2.warnings import (
+    DISCONNECTED_WARNING,
+    clear_disconnected_warning,
+    clear_disconnected_warning_from_printer,
+)
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -63,6 +67,15 @@ def test_rebuild_failure_does_not_escape(mocker: MockerFixture, caplog: pytest.L
     cartographer.validate_and_load_models.assert_called_once_with()
     rebuild.assert_called_once_with()
     assert "Unable to clear Cartographer disconnected warning" in caplog.text
+
+
+def test_configfile_lookup_failure_does_not_escape(caplog: pytest.LogCaptureFixture) -> None:
+    printer = Mock()
+    printer.lookup_object.side_effect = RuntimeError("configfile unavailable")
+
+    clear_disconnected_warning_from_printer(printer)
+
+    assert "Unable to access K2 runtime warnings after Cartographer reconnect" in caplog.text
 
 
 @pytest.mark.parametrize("version", [None, "5.1.0"])

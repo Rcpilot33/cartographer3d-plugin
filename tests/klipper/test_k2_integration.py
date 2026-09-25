@@ -114,6 +114,38 @@ def test_reconnect_rebuilds_before_callbacks_and_blocks_failure(
     assert platform.is_disconnected() is failure
 
 
+def test_reconnect_event_while_host_still_disconnected_blocks_finalization(
+    k2_module: ModuleType,
+    mocker: MockerFixture,
+) -> None:
+    config = Mock()
+    host = Mock(is_non_critical=True, non_critical_disconnected=True)
+    host.get_non_critical_reconnect_event_name.return_value = "reconnected"
+    host.get_non_critical_disconnect_event_name.return_value = "disconnected"
+    mocker.patch("cartographer.adapters.klipper_like.mcu_platform._mcu_module.get_printer_mcu", return_value=host)
+    platform = k2_module.K2McuPlatform(config, "cartographer")
+    events: dict[str, object] = {}
+    config.get_printer().register_event_handler.side_effect = events.__setitem__
+    configure = Mock()
+    reconnect = Mock()
+    platform.register_config_callback(configure)
+    platform.register_lifecycle_handlers(
+        on_identify=Mock(),
+        on_connect=Mock(),
+        on_shutdown=Mock(),
+        on_reconnect=reconnect,
+        on_disconnect=Mock(),
+    )
+
+    callback = events["reconnected"]
+    assert callable(callback)
+    callback()
+
+    configure.assert_not_called()
+    reconnect.assert_not_called()
+    assert platform.is_disconnected() is True
+
+
 @pytest.mark.parametrize("mode", ["scan", "touch"])
 def test_disconnected_homing_never_arms_dispatch(carto_mcu: type, mode: str) -> None:
     platform = Mock()
@@ -157,9 +189,7 @@ def test_stop_homing_disarms_even_when_wait_fails(carto_mcu: type) -> None:
     dispatch.stop.assert_called_once()
 
 
-def test_k2_valid_trigger_finalizes_dispatch_before_disarming_firmware(
-    carto_mcu: type, mocker: MockerFixture
-) -> None:
+def test_k2_valid_trigger_finalizes_dispatch_before_disarming_firmware(carto_mcu: type, mocker: MockerFixture) -> None:
     mocker.patch.object(sys.modules["mcu"].MCU_trsync, "REASON_ENDSTOP_HIT", 1)
     order: list[str] = []
     platform = Mock()
@@ -191,6 +221,23 @@ def test_k2_disconnect_during_trigger_cleanup_never_disarms_after_failed_dispatc
 
     assert caught.value is failure
     mcu._commands.send_stop_home.assert_not_called()
+
+
+def test_k2_clean_trigger_timeout_fails_homing_without_shutdown(carto_mcu: type, mocker: MockerFixture) -> None:
+    mocker.patch.object(sys.modules["mcu"].MCU_trsync, "REASON_COMMS_TIMEOUT", 2)
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    dispatch = platform.create_trigger_dispatch.return_value
+    dispatch.stop_before_mcu_homing_disarm = True
+    dispatch.stop.return_value = 2
+    mcu = carto_mcu(platform, Mock())
+    mcu._commands = Mock()
+
+    with pytest.raises(RuntimeError, match="Communication timeout during homing"):
+        mcu.stop_homing(1.0)
+
+    mcu._commands.send_stop_home.assert_called_once()
+    platform.invoke_shutdown.assert_not_called()
 
 
 @pytest.mark.parametrize("failure_index", [0, 1])
@@ -244,9 +291,8 @@ def test_k2_stop_keeps_success_and_timeout_distinct(
         participant.stop.return_value = 1
     dispatch._trsyncs[1].stop.return_value = 2 if timeout else 3
     if timeout:
-        with pytest.raises(RuntimeError, match="Communication timeout"):
-            dispatch.stop()
-        dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_called_once()
+        assert dispatch.stop() == 2
+        dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_not_called()
     else:
         assert dispatch.stop() == 1
         dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_not_called()
@@ -306,3 +352,95 @@ def test_disconnected_session_entry_rejected_and_reconnect_allowed(
     with mcu.start_session() as recovered:
         assert recovered.get_items() == []
     assert start_streaming.call_count == int(active_session) + 1
+
+
+def test_reconnect_stops_stale_stream_before_callbacks(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    mcu = carto_mcu(platform, Mock())
+    order: list[str] = []
+    mocker.patch.object(mcu, "stop_streaming", side_effect=lambda: order.append("stop"))
+    mcu.register_reconnect_callback(lambda: order.append("callback"))
+
+    platform.register_lifecycle_handlers.call_args.kwargs["on_reconnect"]()
+
+    assert order == ["stop", "callback"]
+    platform.invoke_shutdown.assert_not_called()
+
+
+def test_reconnect_stream_reset_failure_blocks_callbacks(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    mcu = carto_mcu(platform, Mock())
+    callback = Mock()
+    failure = RuntimeError("stream reset failed")
+    mocker.patch.object(mcu, "stop_streaming", side_effect=failure)
+    mcu.register_reconnect_callback(callback)
+
+    platform.register_lifecycle_handlers.call_args.kwargs["on_reconnect"]()
+
+    callback.assert_not_called()
+    platform.invoke_shutdown.assert_called_once_with("Cartographer MCU reconnect failed: stream reset failed")
+
+
+def test_disconnect_disables_immediate_processing(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    mcu = carto_mcu(platform, Mock())
+    set_immediate = mocker.patch.object(mcu._async_processor, "set_immediate")
+
+    platform.register_lifecycle_handlers.call_args.kwargs["on_disconnect"]()
+
+    set_immediate.assert_called_once_with(False)
+
+
+def test_consecutive_invalid_temperatures_abort_active_session(
+    carto_mcu: type,
+    mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    platform = Mock()
+    platform.clock32_to_clock64.return_value = 1
+    platform.clock_to_print_time.return_value = 1.0
+    mcu = carto_mcu(platform, Mock())
+    constants = Mock()
+    constants.count_to_frequency.return_value = 3_000_000.0
+    constants.calculate_temperature.return_value = 250.0
+    mcu._constants = constants
+    stream = Mock()
+    stream.sessions = {Mock()}
+    mcu._stream = stream
+    mocker.patch("cartographer.mcu.mcu.MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES", 2)
+    data = {"clock": 1, "data": 2, "temp": 3}
+
+    mcu._process_raw_data(data)
+    stream.abort_all_sessions.assert_not_called()
+    mcu._process_raw_data(data)
+
+    error = stream.abort_all_sessions.call_args.args[0]
+    assert isinstance(error, RuntimeError)
+    assert "2 consecutive invalid temperature readings" in str(error)
+    assert "Skipping Cartographer sample with invalid temperature" in caplog.text
+
+
+def test_valid_temperature_resets_invalid_sample_counter(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.clock32_to_clock64.return_value = 1
+    platform.clock_to_print_time.return_value = 1.0
+    platform.get_requested_position.return_value = Mock()
+    mcu = carto_mcu(platform, Mock())
+    constants = Mock()
+    constants.count_to_frequency.return_value = 3_000_000.0
+    constants.calculate_temperature.side_effect = [250.0, 25.0, 250.0]
+    mcu._constants = constants
+    stream = Mock()
+    stream.sessions = {Mock()}
+    mcu._stream = stream
+    mocker.patch("cartographer.mcu.mcu.MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES", 2)
+    data = {"clock": 1, "data": 2, "temp": 3}
+
+    for _ in range(3):
+        mcu._process_raw_data(data)
+
+    stream.abort_all_sessions.assert_not_called()
+    stream.add_item.assert_called_once()

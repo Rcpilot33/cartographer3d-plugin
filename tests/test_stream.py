@@ -21,9 +21,9 @@ class MockCondition(Condition):
             self._condition.notify_all()
 
     @override
-    def wait_for(self, predicate: Callable[[], bool]) -> None:
+    def wait_for(self, predicate: Callable[[], bool], timeout: float | None = None) -> bool:
         with self._condition:
-            _ = self._condition.wait_for(predicate)
+            return self._condition.wait_for(predicate, timeout)
 
 
 class MockStream(Stream[object]):
@@ -80,6 +80,14 @@ class TestStream:
 
         stream.end_session(session)
         worker.join()  # Ensure thread has finished before exiting
+
+    def test_wait_for_times_out(self, stream: Stream[object]) -> None:
+        session = stream.start_session()
+
+        with pytest.raises(TimeoutError, match="Timed out waiting for Cartographer samples"):
+            session.wait_for(lambda items: bool(items), timeout=0.01)
+
+        stream.end_session(session)
 
 
 class TestSessionAbort:

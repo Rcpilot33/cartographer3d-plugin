@@ -106,6 +106,7 @@ class GridPointResult:
     point: Point
     z: float
     sample_count: int
+    nonfinite_sample_count: int = 0
 
 
 @final
@@ -126,6 +127,7 @@ class SampleProcessor:
         NOTE: For better performance, use assign_samples_to_grid_batch() instead.
         """
         accumulator: dict[tuple[int, int], list[float]] = defaultdict(list)
+        nonfinite_counts: dict[tuple[int, int], int] = defaultdict(int)
         sample_points = [
             (sample.position.x, sample.position.y, sample) for sample in samples if sample.position is not None
         ]
@@ -144,7 +146,10 @@ class SampleProcessor:
                 continue
 
             sample_height = calculate_height(sample)
-            accumulator[(j, i)].append(sample_height)
+            if np.isfinite(sample_height):
+                accumulator[(j, i)].append(sample_height)
+            else:
+                nonfinite_counts[(j, i)] += 1
 
         results: list[GridPointResult] = []
         for j in range(self.grid.y_resolution):
@@ -154,7 +159,14 @@ class SampleProcessor:
                 count = len(values)
 
                 z = float(np.median(values)) if values else np.nan
-                results.append(GridPointResult(point=grid_point, z=z, sample_count=count))
+                results.append(
+                    GridPointResult(
+                        point=grid_point,
+                        z=z,
+                        sample_count=count,
+                        nonfinite_sample_count=nonfinite_counts.get((j, i), 0),
+                    )
+                )
 
         return results
 
@@ -185,16 +197,10 @@ class SampleProcessor:
         xs = np.array([s.position.x for s in valid_samples if s.position is not None])
         ys = np.array([s.position.y for s in valid_samples if s.position is not None])
 
-        # Filter out inf/-inf heights (out of model range)
+        # Track out-of-model heights separately so callers can reject unsafe
+        # meshes without allowing a few bad readings to poison the median.
         finite_mask = np.isfinite(valid_heights)
         infinite_height_count = len(valid_samples) - int(np.sum(finite_mask))
-
-        xs = xs[finite_mask]
-        ys = ys[finite_mask]
-        valid_heights = valid_heights[finite_mask]
-
-        if len(xs) == 0:
-            return self._build_empty_results()
 
         # Vectorized bounds check WITH EPSILON TOLERANCE (matching original)
         in_bounds = (
@@ -204,14 +210,7 @@ class SampleProcessor:
             & (ys <= self.grid.max_point[1] + epsilon)
         )
 
-        out_of_bounds_count = len(xs) - int(np.sum(in_bounds))
-
-        xs = xs[in_bounds]
-        ys = ys[in_bounds]
-        valid_heights = valid_heights[in_bounds]
-
-        if len(xs) == 0:
-            return self._build_empty_results()
+        out_of_bounds_count = int(np.sum(finite_mask & ~in_bounds))
 
         # Vectorized grid index calculation
         i_indices = np.round((xs - self.grid.min_point[0]) / self.grid.x_step).astype(np.int32)
@@ -227,11 +226,17 @@ class SampleProcessor:
         distances = np.hypot(xs - grid_xs, ys - grid_ys)
         close_enough = distances <= self.max_distance
 
-        too_far_count = len(i_indices) - int(np.sum(close_enough))
-
-        i_indices = i_indices[close_enough]
-        j_indices = j_indices[close_enough]
-        valid_heights = valid_heights[close_enough]
+        too_far_count = int(np.sum(finite_mask & in_bounds & ~close_enough))
+        spatially_assignable = in_bounds & close_enough
+        flat_indices = j_indices * self.grid.x_resolution + i_indices
+        total_cells = self.grid.x_resolution * self.grid.y_resolution
+        nonfinite_counts = np.bincount(
+            flat_indices[spatially_assignable & ~finite_mask],
+            minlength=total_cells,
+        ).astype(np.int32)
+        usable = spatially_assignable & finite_mask
+        flat_indices = flat_indices[usable]
+        valid_heights = valid_heights[usable]
 
         logger.info(
             "Filtered samples: %d invalid positions, %d infinite heights, %d out of bounds, "
@@ -240,15 +245,12 @@ class SampleProcessor:
             infinite_height_count,
             out_of_bounds_count,
             too_far_count,
-            len(i_indices),
+            len(flat_indices),
             original_count,
         )
 
-        # Flatten 2D grid indices to 1D for efficient grouping
-        flat_indices = j_indices * self.grid.x_resolution + i_indices
-
         # Build results using grouped median
-        results = self._compute_grid_medians(flat_indices, valid_heights)
+        results = self._compute_grid_medians(flat_indices, valid_heights, nonfinite_counts)
 
         # Count grid points with no samples
         empty_count = sum(1 for r in results if r.sample_count == 0)
@@ -267,7 +269,10 @@ class SampleProcessor:
         return results
 
     def _compute_grid_medians(
-        self, flat_indices: NDArray[np.int32], heights: NDArray[np.float64]
+        self,
+        flat_indices: NDArray[np.int32],
+        heights: NDArray[np.float64],
+        nonfinite_counts: NDArray[np.int32] | None = None,
     ) -> list[GridPointResult]:
         """Compute median heights for each grid cell."""
         total_cells = self.grid.x_resolution * self.grid.y_resolution
@@ -283,6 +288,8 @@ class SampleProcessor:
         # Create lookup for median and count per cell
         medians = np.full(total_cells, np.nan)
         sample_counts = np.zeros(total_cells, dtype=np.int32)
+        if nonfinite_counts is None:
+            nonfinite_counts = np.zeros(total_cells, dtype=np.int32)
 
         for idx, first, count in zip(unique_indices, first_occurrence, counts):
             cell_heights = sorted_heights[first : first + count]
@@ -300,6 +307,7 @@ class SampleProcessor:
                         point=grid_point,
                         z=float(medians[flat_idx]),
                         sample_count=int(sample_counts[flat_idx]),
+                        nonfinite_sample_count=int(nonfinite_counts[flat_idx]),
                     )
                 )
 

@@ -68,14 +68,18 @@ class K2TriggerDispatch(TriggerDispatch):
                         stepper.note_homing_end()
                     except Exception:
                         logger.exception("Failed to finalize K2 stepper homing state")
-        if failure is None and mcu.MCU_trsync.REASON_COMMS_TIMEOUT in results:
-            failure = RuntimeError("Communication timeout during homing")
         if failure is not None:
             # HomingMove cannot reconcile halted positions after home_wait
             # raises. Do not leave the printer Ready with stale coordinates.
             printer = self._trsyncs[0].get_mcu().get_printer()
             printer.invoke_shutdown("Cartographer homing communication/cleanup failure; restart and rehome")
             raise failure
+        if mcu.MCU_trsync.REASON_COMMS_TIMEOUT in results:
+            # Every participant completed its normal stop path, including
+            # note_homing_end(). Return the reason so CartographerMcu can fail
+            # this homing operation without escalating a clean timeout to a
+            # printer shutdown.
+            return mcu.MCU_trsync.REASON_COMMS_TIMEOUT
         return results[0]
 
     def reinit_after_reconnect(self) -> None:

@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MAX_NONFINITE_SAMPLE_FRACTION = 0.25
+
 
 def _parse_max_corner_radius(value: str, name: str) -> float | None:
     stripped = value.strip()
@@ -366,8 +368,32 @@ class BedMeshCalibrateMacro(Macro, SupportsFallbackMacro):
         positions: list[Position] = []
 
         total_samples = sum(r.sample_count for r in results)
+        total_nonfinite = sum(r.nonfinite_sample_count for r in results)
+        total_assigned = total_samples + total_nonfinite
+        nonfinite_fraction = total_nonfinite / total_assigned if total_assigned else 0.0
+        majority_nonfinite_points = [
+            (r.point, r.sample_count, r.nonfinite_sample_count)
+            for r in results
+            if r.nonfinite_sample_count > r.sample_count
+        ]
         invalid_points = [(r.point, r.sample_count) for r in results if not isfinite(r.z)]
         sparse_points = [(r.point, r.sample_count) for r in results if isfinite(r.z) and r.sample_count < 3]
+
+        if nonfinite_fraction > MAX_NONFINITE_SAMPLE_FRACTION or majority_nonfinite_points:
+            majority_list = ", ".join(
+                f"({p[0]:.2f},{p[1]:.2f}) finite={finite} non-finite={nonfinite}"
+                for p, finite, nonfinite in majority_nonfinite_points
+            )
+            lines = [
+                "Mesh scan failed: too many samples were outside the calibrated model range.",
+                f"Non-finite samples: {total_nonfinite}/{total_assigned} ({nonfinite_fraction:.1%}).",
+            ]
+            if majority_list:
+                lines.append(f"Grid points with a majority of non-finite samples: {majority_list}.")
+            lines.append("Check the scan height and recalibrate the Cartographer model if needed.")
+            msg = " ".join(lines)
+            logger.error(msg)
+            raise RuntimeError(msg)
 
         if invalid_points:
             invalid_list = ", ".join(f"({p[0]:.2f},{p[1]:.2f}) samples={n}" for p, n in invalid_points)

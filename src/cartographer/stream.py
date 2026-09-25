@@ -6,14 +6,15 @@ from typing import Callable, Generic, Protocol, TypeVar
 from cartographer.interfaces.errors import McuDisconnectedError
 
 T = TypeVar("T")
+SESSION_WAIT_TIMEOUT = 5.0
 
 
 class Condition(Protocol):
     def notify_all(self) -> None:
         """Wakes all threads waiting on this condition."""
 
-    def wait_for(self, predicate: Callable[[], bool]) -> None:
-        """Wait until a condition evaluates to True."""
+    def wait_for(self, predicate: Callable[[], bool], timeout: float | None = None) -> bool:
+        """Wait until a condition evaluates to True or the timeout expires."""
         ...
 
 
@@ -41,13 +42,22 @@ class Session(Generic[T]):
         self.items.append(item)
         self._condition.notify_all()
 
-    def wait_for(self, condition: Callable[[list[T]], bool]) -> None:
+    def wait_for(
+        self,
+        condition: Callable[[list[T]], bool],
+        *,
+        timeout: float = SESSION_WAIT_TIMEOUT,
+    ) -> None:
         """Waits until the given condition function returns True.
 
         Raises McuDisconnectedError (or the stored abort error) if the session was aborted.
+        Raises TimeoutError if the condition is not met before the timeout.
         """
-        self._condition.wait_for(lambda: self._aborted or condition(self.items))
+        completed = self._condition.wait_for(lambda: self._aborted or condition(self.items), timeout)
         self.raise_if_aborted()
+        if not completed:
+            msg = f"Timed out waiting for Cartographer samples after {timeout:.1f} seconds"
+            raise TimeoutError(msg)
 
     def raise_if_aborted(self) -> None:
         """Nonblocking checkpoint; reconnect cannot revive an aborted session."""
