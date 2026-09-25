@@ -1,6 +1,6 @@
-# Checked-in fallback for K2 source/symlink installs (no wheel build).
-# Build tooling may replace this file. The local suffix identifies the
-# upstream snapshot, not an official Cartographer release number.
+# Checked-in fallback for source/symlink installs. Build tooling writes its
+# generated version to the ignored _version.py module so the checkout stays
+# clean after local builds and editable installs.
 
 __all__ = [
     "__version__",
@@ -28,7 +28,16 @@ version_tuple: VERSION_TUPLE
 commit_id: COMMIT_ID
 __commit_id__: COMMIT_ID
 
-__version__ = version = "1.5.0+k2.upstream.8c3b0cc"
-__version_tuple__ = version_tuple = (1, 5, 0, "k2.upstream.8c3b0cc")
-
-__commit_id__ = commit_id = None
+try:
+    from cartographer._version import (
+        __commit_id__,
+        __version__,
+        __version_tuple__,
+        commit_id,
+        version,
+        version_tuple,
+    )
+except ImportError:
+    __version__ = version = "1.10.1b1+k2.1"
+    __version_tuple__ = version_tuple = (1, 10, 1, "b1", "k2", 1)
+    __commit_id__ = commit_id = None

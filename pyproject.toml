@@ -62,7 +62,7 @@ source = "vcs"
 raw-options.local_scheme = "no-local-version"
 
 [tool.hatch.build.hooks.vcs]
-version-file = "src/cartographer/__version__.py"
+version-file = "src/cartographer/_version.py"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["/.github", "/.jj", "/docs"]
