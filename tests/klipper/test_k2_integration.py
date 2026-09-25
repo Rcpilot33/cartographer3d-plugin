@@ -189,9 +189,7 @@ def test_stop_homing_disarms_even_when_wait_fails(carto_mcu: type) -> None:
     dispatch.stop.assert_called_once()
 
 
-def test_k2_valid_trigger_finalizes_dispatch_before_disarming_firmware(
-    carto_mcu: type, mocker: MockerFixture
-) -> None:
+def test_k2_valid_trigger_finalizes_dispatch_before_disarming_firmware(carto_mcu: type, mocker: MockerFixture) -> None:
     mocker.patch.object(sys.modules["mcu"].MCU_trsync, "REASON_ENDSTOP_HIT", 1)
     order: list[str] = []
     platform = Mock()

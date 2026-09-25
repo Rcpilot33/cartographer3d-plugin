@@ -71,12 +71,13 @@ def test_measure_distance_without_model_fails_before_stream(
     mocker: MockerFixture,
 ) -> None:
     model_check = mocker.patch.object(probe.scan, "get_model", side_effect=RuntimeError("Scan model not loaded."))
+    start_session = mocker.patch.object(mcu, "start_session")
 
     with pytest.raises(RuntimeError, match="Scan model not loaded"):
         probe.scan.measure_distance()
 
     model_check.assert_called_once_with()
-    mcu.start_session.assert_not_called()
+    start_session.assert_not_called()
 
 
 def test_probe_errors_when_not_homed(probe: Probe, toolhead: Toolhead):
