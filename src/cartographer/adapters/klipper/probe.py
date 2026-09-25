@@ -103,9 +103,12 @@ class KlipperCartographerProbe:
         finally:
             session.end_probe_session()
 
+    @reraise_for_klipper
     def probing_move(self, pos: object, speed: float) -> None:
-        """Compatibility shim - not used by Cartographer"""
-        pass
+        """Reject the unsupported legacy motion API instead of silently succeeding."""
+        del pos, speed
+        msg = "Cartographer does not support the legacy probing_move API"
+        raise RuntimeError(msg)
 
     def get_probe_params(self, gcmd: GCodeCommand | None = None):
         return {
