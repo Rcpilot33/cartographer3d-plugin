@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES = 100
+
 
 class _RawData(TypedDict):
     clock: int
@@ -81,6 +83,7 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
     ) -> None:
         self._platform: McuPlatform = platform
         self._sensor_ready: bool = False
+        self._invalid_temperature_sample_count: int = 0
         self._reconnect_callbacks: list[Callable[[], None]] = []
         reactor: Reactor = platform.get_reactor()
         self._stream: CartographerStream[Sample] = CartographerStream[Sample](self, reactor)
@@ -323,8 +326,23 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
         frequency = self.constants.count_to_frequency(count)
         temperature = self.constants.calculate_temperature(data["temp"])
         if not -20 <= temperature <= 200:
-            logger.debug("Skipping sample with invalid temperature: %.1f", temperature)
+            self._invalid_temperature_sample_count += 1
+            if self._invalid_temperature_sample_count == 1:
+                logger.warning("Skipping Cartographer sample with invalid temperature: %.1fC", temperature)
+            if (
+                self._invalid_temperature_sample_count >= MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES
+                and self._stream.sessions
+            ):
+                msg = (
+                    "Cartographer stopped producing usable samples after "
+                    f"{self._invalid_temperature_sample_count} consecutive invalid temperature readings "
+                    f"(latest: {temperature:.1f}C). Check the sensor thermistor and USB connection."
+                )
+                if self._invalid_temperature_sample_count == MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES:
+                    logger.error(msg)
+                self._stream.abort_all_sessions(RuntimeError(msg))
             return
+        self._invalid_temperature_sample_count = 0
         position = self._platform.get_requested_position(time)
 
         sample = Sample(

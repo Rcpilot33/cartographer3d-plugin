@@ -25,14 +25,20 @@ class CartographerCondition(Condition):
             self.reactor.update_timer(wait.timer, self.reactor.NOW)
 
     @override
-    def wait_for(self, predicate: Callable[[], bool]) -> None:
+    def wait_for(self, predicate: Callable[[], bool], timeout: float | None = None) -> bool:
+        if predicate():
+            return True
         wait = greenlet.getcurrent()
+        deadline = self.reactor.NEVER if timeout is None else self.reactor.monotonic() + timeout
         self.waiting.append(wait)
-        while True:
-            if predicate():
-                break
-            _ = self.reactor.pause(self.reactor.NEVER)
-        self.waiting.remove(wait)
+        try:
+            while not predicate():
+                eventtime = self.reactor.pause(deadline)
+                if timeout is not None and eventtime >= deadline and not predicate():
+                    return False
+            return True
+        finally:
+            self.waiting.remove(wait)
 
 
 T = TypeVar("T")

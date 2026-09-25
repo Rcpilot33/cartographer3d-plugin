@@ -378,3 +378,55 @@ def test_disconnect_disables_immediate_processing(carto_mcu: type, mocker: Mocke
     platform.register_lifecycle_handlers.call_args.kwargs["on_disconnect"]()
 
     set_immediate.assert_called_once_with(False)
+
+
+def test_consecutive_invalid_temperatures_abort_active_session(
+    carto_mcu: type,
+    mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    platform = Mock()
+    platform.clock32_to_clock64.return_value = 1
+    platform.clock_to_print_time.return_value = 1.0
+    mcu = carto_mcu(platform, Mock())
+    constants = Mock()
+    constants.count_to_frequency.return_value = 3_000_000.0
+    constants.calculate_temperature.return_value = 250.0
+    mcu._constants = constants
+    stream = Mock()
+    stream.sessions = {Mock()}
+    mcu._stream = stream
+    mocker.patch("cartographer.mcu.mcu.MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES", 2)
+    data = {"clock": 1, "data": 2, "temp": 3}
+
+    mcu._process_raw_data(data)
+    stream.abort_all_sessions.assert_not_called()
+    mcu._process_raw_data(data)
+
+    error = stream.abort_all_sessions.call_args.args[0]
+    assert isinstance(error, RuntimeError)
+    assert "2 consecutive invalid temperature readings" in str(error)
+    assert "Skipping Cartographer sample with invalid temperature" in caplog.text
+
+
+def test_valid_temperature_resets_invalid_sample_counter(carto_mcu: type, mocker: MockerFixture) -> None:
+    platform = Mock()
+    platform.clock32_to_clock64.return_value = 1
+    platform.clock_to_print_time.return_value = 1.0
+    platform.get_requested_position.return_value = Mock()
+    mcu = carto_mcu(platform, Mock())
+    constants = Mock()
+    constants.count_to_frequency.return_value = 3_000_000.0
+    constants.calculate_temperature.side_effect = [250.0, 25.0, 250.0]
+    mcu._constants = constants
+    stream = Mock()
+    stream.sessions = {Mock()}
+    mcu._stream = stream
+    mocker.patch("cartographer.mcu.mcu.MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES", 2)
+    data = {"clock": 1, "data": 2, "temp": 3}
+
+    for _ in range(3):
+        mcu._process_raw_data(data)
+
+    stream.abort_all_sessions.assert_not_called()
+    stream.add_item.assert_called_once()
