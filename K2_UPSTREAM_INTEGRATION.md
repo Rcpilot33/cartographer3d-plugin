@@ -59,11 +59,13 @@ This was not a measurement of stop latency or nozzle-contact safety.
 
 K2 dispatch cleanup now attempts every participant, skips serial queries to an
 already-disconnected MCU, and finalizes its local stepper state. Cleanup errors
-and communication timeouts shut the host down and propagate as failures:
-recovery requires the K2 protected restart procedure and rehoming, not another
-touch attempt with potentially stale coordinates. The host MCU patch must also
-be refreshed to skip shutdown commands to the disconnected non-critical MCU.
-This does not change trigger-sync timeout values or normal mid-print reconnect.
+shut the host down and propagate as failures: recovery requires the K2 protected
+restart procedure and rehoming, not another touch attempt with potentially stale
+coordinates. A clean trigger-sync communication timeout, where every participant
+completed normal cleanup and finalized its steppers, fails the homing operation
+without shutting down the host. The host MCU patch must also be refreshed to skip
+shutdown commands to the disconnected non-critical MCU. This does not change
+trigger-sync timeout values or normal mid-print reconnect.
 
 Scan meshing now checks the session's latched abort before and after enqueueing
 each path point and after each run's motion drain. It stops issuing further

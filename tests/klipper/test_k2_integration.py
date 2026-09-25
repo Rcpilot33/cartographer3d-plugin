@@ -225,6 +225,23 @@ def test_k2_disconnect_during_trigger_cleanup_never_disarms_after_failed_dispatc
     mcu._commands.send_stop_home.assert_not_called()
 
 
+def test_k2_clean_trigger_timeout_fails_homing_without_shutdown(carto_mcu: type, mocker: MockerFixture) -> None:
+    mocker.patch.object(sys.modules["mcu"].MCU_trsync, "REASON_COMMS_TIMEOUT", 2)
+    platform = Mock()
+    platform.is_disconnected.return_value = False
+    dispatch = platform.create_trigger_dispatch.return_value
+    dispatch.stop_before_mcu_homing_disarm = True
+    dispatch.stop.return_value = 2
+    mcu = carto_mcu(platform, Mock())
+    mcu._commands = Mock()
+
+    with pytest.raises(RuntimeError, match="Communication timeout during homing"):
+        mcu.stop_homing(1.0)
+
+    mcu._commands.send_stop_home.assert_called_once()
+    platform.invoke_shutdown.assert_not_called()
+
+
 @pytest.mark.parametrize("failure_index", [0, 1])
 @pytest.mark.parametrize("already_disconnected", [False, True])
 def test_k2_stop_cleans_every_participant_after_failure(
@@ -276,9 +293,8 @@ def test_k2_stop_keeps_success_and_timeout_distinct(
         participant.stop.return_value = 1
     dispatch._trsyncs[1].stop.return_value = 2 if timeout else 3
     if timeout:
-        with pytest.raises(RuntimeError, match="Communication timeout"):
-            dispatch.stop()
-        dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_called_once()
+        assert dispatch.stop() == 2
+        dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_not_called()
     else:
         assert dispatch.stop() == 1
         dispatch._trsyncs[0].get_mcu().get_printer().invoke_shutdown.assert_not_called()
