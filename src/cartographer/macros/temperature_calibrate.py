@@ -9,7 +9,6 @@ from typing_extensions import override
 
 from cartographer.coil.calibration import fit_coil_temperature_model
 from cartographer.interfaces.printer import GCodeDispatch, Macro, MacroParams, Mcu, Sample, Toolhead
-from cartographer.lib import scipy_helpers
 from cartographer.lib.csv import generate_filepath, write_samples_to_csv
 from cartographer.lib.log import log_duration
 from cartographer.macros.fields import param, parse
@@ -64,8 +63,6 @@ class TemperatureCalibrateMacro(Macro):
 
     @override
     def run(self, params: MacroParams) -> None:
-        scipy_helpers.raise_if_curve_fit_unavailable()
-
         p = parse(TemperatureCalibrateParams, params)
 
         if p.max_temp < p.min_temp + 20:

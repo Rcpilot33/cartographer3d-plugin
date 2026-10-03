@@ -4,9 +4,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from cartographer.coil.helpers import line0, line120, line_fit, param_linear
 from cartographer.interfaces.configuration import CoilCalibrationConfiguration
-from cartographer.lib.scipy_helpers import curve_fit
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -45,10 +43,10 @@ def fit_coil_temperature_model(
 
     # Fit linear relationship: coefficient_a = linear_a * (freq - min_freq) + linear_b
     freq_array: NDArray[np.float_] = np.asarray(frequencies) - ref.min_frequency
-    linear_params_a, _ = curve_fit(param_linear, freq_array, coefficients_a, maxfev=100000, ftol=1e-10, xtol=1e-10)
+    linear_params_a = _least_squares(freq_array, coefficients_a)
 
     # Fit linear relationship: coefficient_b = linear_a * (freq - min_freq) + linear_b
-    linear_params_b, _ = curve_fit(param_linear, freq_array, coefficients_b, maxfev=100000, ftol=1e-10, xtol=1e-10)
+    linear_params_b = _least_squares(freq_array, coefficients_b)
 
     return CoilCalibrationConfiguration(
         a_a=linear_params_a[0],  # Slope for 'a' coefficient vs frequency
@@ -56,6 +54,38 @@ def fit_coil_temperature_model(
         b_a=linear_params_b[0],  # Slope for 'b' coefficient vs frequency
         b_b=linear_params_b[1],  # Intercept for 'b' coefficient vs frequency
     )
+
+
+def _least_squares(x: NDArray[np.float_], y: NDArray[np.float_] | list[float]) -> NDArray[np.float_]:
+    """Fit a slope and intercept without requiring SciPy."""
+    design = np.column_stack((x, np.ones_like(x)))
+    coefficients, _, _, _ = np.linalg.lstsq(design, np.asarray(y), rcond=None)
+    return coefficients
+
+
+def _fit_nonnegative_quadratic(
+    temperatures: NDArray[np.float_], frequencies: NDArray[np.float_]
+) -> tuple[float, float, float]:
+    """Fit a quadratic with a >= 0, refitting on the boundary when needed."""
+    design = np.column_stack((temperatures**2, temperatures, np.ones_like(temperatures)))
+    coefficients, _, _, _ = np.linalg.lstsq(design, frequencies, rcond=None)
+    a, b, c = coefficients
+    if a < 0:
+        b, c = _least_squares(temperatures, frequencies)
+        a = 0.0
+    return float(a), float(b), float(c)
+
+
+def _fit_fixed_vertex(
+    temperatures: NDArray[np.float_], frequencies: NDArray[np.float_], vertex: float
+) -> tuple[float, float]:
+    """Fit a quadratic constrained to a vertex at 0 or 120 C and a >= 0."""
+    column = temperatures**2 - 2 * vertex * temperatures
+    a, c = _least_squares(column, frequencies)
+    if a < 0:
+        a = 0.0
+        c = float(np.mean(frequencies))
+    return float(a), float(c)
 
 
 def _downsample_by_temperature(samples: list[Sample], target_count: int) -> list[Sample]:
@@ -118,54 +148,35 @@ def _process_samples(samples: list[Sample]) -> tuple[float, float, float]:
     if len(samples) > 1000:
         samples = _downsample_by_temperature(samples, target_count=800)
 
-    frequencies: list[float] = [s.frequency for s in samples]
-    temperatures: list[float] = [s.temperature for s in samples]
+    frequencies = np.asarray([s.frequency for s in samples])
+    temperatures = np.asarray([s.temperature for s in samples])
 
     # Fit quadratic: freq = a*temp² + b*temp + c
-    param_bounds = ([0, -np.inf, -np.inf], [np.inf, np.inf, np.inf])
-    [a, b, c], _ = curve_fit(
-        line_fit, temperatures, frequencies, bounds=param_bounds, maxfev=100000, ftol=1e-10, xtol=1e-10
-    )
+    a, b, c = _fit_nonnegative_quadratic(temperatures, frequencies)
 
     # Calculate vertex position of the quadratic: x = -b/(2a)
-    vertex_temperature = -b / (2 * a)
+    vertex_temperature = -b / (2 * a) if a > 0 else (float("inf") if b < 0 else 0.0)
 
     # Handle constrained cases based on vertex position
     if vertex_temperature > 120:
         # Vertex too hot - constrain to 120°C
-        [constrained_a, constrained_b], _ = curve_fit(
-            line120,
-            temperatures,
-            frequencies,
-            bounds=([0, -np.inf], [np.inf, np.inf]),
-            maxfev=100000,
-            ftol=1e-10,
-            xtol=1e-10,
-        )
+        constrained_a, constrained_c = _fit_fixed_vertex(temperatures, frequencies, 120.0)
         return (
             constrained_a,  # a coefficient
             -240 * constrained_a,  # b coefficient (from line120 constraint)
-            line120(120, constrained_a, constrained_b),  # freq at vertex (120°C)
+            constrained_c - 120**2 * constrained_a,  # freq at vertex (120°C)
         )
 
     elif vertex_temperature < 0:
         # Vertex too cold - constrain to 0°C
-        [constrained_a, constrained_b], _ = curve_fit(
-            line0,
-            temperatures,
-            frequencies,
-            bounds=([0, -np.inf], [np.inf, np.inf]),
-            maxfev=100000,
-            ftol=1e-10,
-            xtol=1e-10,
-        )
+        constrained_a, constrained_c = _fit_fixed_vertex(temperatures, frequencies, 0.0)
         return (
             constrained_a,  # a coefficient
             0,  # b coefficient (from line0 constraint)
-            line0(0, constrained_a, constrained_b),  # freq at vertex (0°C)
+            constrained_c,  # freq at vertex (0°C)
         )
 
     # Normal case - vertex within reasonable range (0-120°C)
     # Calculate frequency at the vertex and return coefficients
-    frequency_at_vertex = line_fit(vertex_temperature, a, b, c)
+    frequency_at_vertex = a * vertex_temperature**2 + b * vertex_temperature + c
     return (a, b, frequency_at_vertex)
