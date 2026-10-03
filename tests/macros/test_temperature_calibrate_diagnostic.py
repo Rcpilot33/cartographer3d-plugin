@@ -6,8 +6,9 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from cartographer.interfaces.printer import Sample, TemperatureStatus, ThermalDiagnosticStatus
+from cartographer.interfaces.printer import Position, Sample, TemperatureStatus, ThermalDiagnosticStatus
 from cartographer.macros.temperature_calibrate import TemperatureCalibrateMacro
+from cartographer.toolhead import BacklashCompensatingToolhead
 from tests.mocks.config import MockConfiguration
 from tests.mocks.params import MockParams
 
@@ -19,6 +20,7 @@ class TestTemperatureDiagnostic(TestCase):
         self.toolhead = Mock()
         self.toolhead.is_homed.return_value = True
         self.toolhead.get_axis_limits.return_value = (0.0, 350.0)
+        self.toolhead.get_position.return_value = Position(0.0, 0.0, 0.0)
         self.toolhead.get_thermal_diagnostic_status.return_value = ThermalDiagnosticStatus(
             bed=TemperatureStatus(25.0, 0.0),
             extruder=TemperatureStatus(25.0, 0.0),
@@ -91,6 +93,20 @@ class TestTemperatureDiagnostic(TestCase):
             heater_fans=(),
         )
         with self.assertRaisesRegex(RuntimeError, "idle printer"):
+            self.macro.run(self.params)
+        self.toolhead.move.assert_not_called()
+        self.gcode.run_gcode.assert_not_called()
+
+    def test_backlash_wrapper_passes_through_thermal_status(self) -> None:
+        self.macro.toolhead = BacklashCompensatingToolhead(self.toolhead, 0.05)
+        with patch.object(self.macro, "_run_diagnostic") as diagnostic:
+            self.macro.run(self.params)
+        self.toolhead.get_thermal_diagnostic_status.assert_called_once_with()
+        diagnostic.assert_called_once()
+
+    def test_missing_thermal_status_raises_command_error_without_moving(self) -> None:
+        self.toolhead.get_thermal_diagnostic_status.return_value = None
+        with self.assertRaisesRegex(RuntimeError, "status is unavailable"):
             self.macro.run(self.params)
         self.toolhead.move.assert_not_called()
         self.gcode.run_gcode.assert_not_called()

@@ -9,7 +9,15 @@ from typing import TYPE_CHECKING, Callable, final
 from typing_extensions import override
 
 from cartographer.coil.calibration import fit_coil_temperature_model
-from cartographer.interfaces.printer import GCodeDispatch, Macro, MacroParams, Mcu, Sample, Toolhead
+from cartographer.interfaces.printer import (
+    GCodeDispatch,
+    Macro,
+    MacroParams,
+    Mcu,
+    Sample,
+    ThermalDiagnosticStatus,
+    Toolhead,
+)
 from cartographer.lib.csv import generate_filepath, write_samples_to_csv
 from cartographer.lib.log import log_duration
 from cartographer.macros.fields import param, parse
@@ -82,7 +90,7 @@ class TemperatureCalibrateMacro(Macro):
             raise RuntimeError(msg)
 
         if p.diagnostic:
-            initial = self.toolhead.get_thermal_diagnostic_status()
+            initial = self._thermal_status()
             if initial.bed.target or initial.extruder.target:
                 msg = "Diagnostic requires an idle printer with bed and extruder targets at zero"
                 raise RuntimeError(msg)
@@ -164,7 +172,7 @@ class TemperatureCalibrateMacro(Macro):
 
             def record(phase: str, height: float) -> None:
                 sample = self.mcu.get_last_sample()
-                thermal = self.toolhead.get_thermal_diagnostic_status()
+                thermal = self._thermal_status()
                 writer.writerow(
                     [
                         time.monotonic(),
@@ -241,7 +249,7 @@ class TemperatureCalibrateMacro(Macro):
         while True:
             self.scheduler.sleep(TEMP_CHECK_INTERVAL)
             record("preheat", height)
-            thermal = self.toolhead.get_thermal_diagnostic_status()
+            thermal = self._thermal_status()
             now = time.monotonic()
             ready = (
                 thermal.bed.current >= p.bed_temp - 1
@@ -257,6 +265,17 @@ class TemperatureCalibrateMacro(Macro):
             if now - start >= 3600:
                 msg = "Diagnostic bed/extruder targets did not stabilize within 60 minutes"
                 raise TemperatureStallError(msg)
+
+    def _thermal_status(self) -> ThermalDiagnosticStatus:
+        try:
+            status = self.toolhead.get_thermal_diagnostic_status()
+        except (AttributeError, KeyError, TypeError) as exc:
+            msg = f"Unable to read diagnostic heater/fan status: {exc}"
+            raise RuntimeError(msg) from exc
+        if not isinstance(status, ThermalDiagnosticStatus):
+            msg = "Diagnostic heater/fan status is unavailable from the active toolhead"
+            raise RuntimeError(msg)
+        return status
 
     @log_duration("Cooldown phase")
     def _cool_down_phase(

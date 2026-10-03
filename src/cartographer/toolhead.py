@@ -4,7 +4,14 @@ from typing import Callable
 
 from typing_extensions import override
 
-from cartographer.interfaces.printer import Endstop, HomingAxis, Position, TemperatureStatus, Toolhead
+from cartographer.interfaces.printer import (
+    Endstop,
+    HomingAxis,
+    Position,
+    TemperatureStatus,
+    ThermalDiagnosticStatus,
+    Toolhead,
+)
 
 
 class BacklashCompensatingToolhead(Toolhead):
@@ -74,6 +81,10 @@ class BacklashCompensatingToolhead(Toolhead):
     @override
     def get_extruder_temperature(self) -> TemperatureStatus:
         return self.toolhead.get_extruder_temperature()
+
+    @override
+    def get_thermal_diagnostic_status(self) -> ThermalDiagnosticStatus:
+        return self.toolhead.get_thermal_diagnostic_status()
 
     @override
     def get_max_accel(self) -> float:
