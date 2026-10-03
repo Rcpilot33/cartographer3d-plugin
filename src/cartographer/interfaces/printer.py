@@ -151,6 +151,12 @@ class TemperatureStatus(NamedTuple):
     target: float
 
 
+class ThermalDiagnosticStatus(NamedTuple):
+    bed: TemperatureStatus
+    extruder: TemperatureStatus
+    heater_fans: tuple[tuple[str, float], ...]
+
+
 class GCodeDispatch(Protocol):
     def run_gcode(self, script: str) -> None:
         """Run the given gcode script."""
@@ -216,6 +222,10 @@ class Toolhead(Protocol):
 
     def get_extruder_temperature(self) -> TemperatureStatus:
         """Get the current and target temperature of the extruder."""
+        ...
+
+    def get_thermal_diagnostic_status(self) -> ThermalDiagnosticStatus:
+        """Read bed, extruder, and heater-fan status for calibration diagnostics."""
         ...
 
     def get_max_accel(self) -> float:

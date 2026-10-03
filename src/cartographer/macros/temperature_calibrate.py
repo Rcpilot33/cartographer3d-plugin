@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import csv
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, Callable, final
 
 from typing_extensions import override
 
@@ -39,6 +40,10 @@ class TemperatureCalibrateParams:
     max_temp: int = param("Maximum coil temperature", default=60, min=60, max=90)
     bed_temp: int = param("Bed temperature target", default=90, min=90, max=120)
     z_speed: int = param("Z movement speed", default=5, min=1)
+    diagnostic: int = param("Collect thermal diagnostics without saving a model (0 or 1)", default=0, min=0, max=1)
+    extruder_temp: int = param("Diagnostic extruder target", default=60, min=50, max=100)
+    soak_seconds: int = param("Diagnostic heater soak before sampling", default=120, min=0, max=600)
+    height_count: int = param("Number of diagnostic heights to sample", default=1, min=1, max=3)
 
 
 @final
@@ -76,6 +81,12 @@ class TemperatureCalibrateMacro(Macro):
             msg = "Must home axes before temperature calibration"
             raise RuntimeError(msg)
 
+        if p.diagnostic:
+            initial = self.toolhead.get_thermal_diagnostic_status()
+            if initial.bed.target or initial.extruder.target:
+                msg = "Diagnostic requires an idle printer with bed and extruder targets at zero"
+                raise RuntimeError(msg)
+
         _, max_z = self.toolhead.get_axis_limits("z")
         cooling_height = max_z * 2 / 3
         logger.info(
@@ -91,6 +102,10 @@ class TemperatureCalibrateMacro(Macro):
             y=self.config.bed_mesh.zero_reference_position[1],
             speed=self.config.general.travel_speed,
         )
+
+        if p.diagnostic:
+            self._run_diagnostic(p, cooling_height)
+            return
 
         # Collect data at 3 different heights
         data_per_height: dict[float, list[Sample]] = {}
@@ -126,35 +141,170 @@ class TemperatureCalibrateMacro(Macro):
             "\n".join(csv_files),
         )
 
+    def _run_diagnostic(self, p: TemperatureCalibrateParams, cooling_height: float) -> None:
+        """Repeat the three-height sequence with fixed heater targets and no model save."""
+        path = generate_filepath("temp_calib_thermal_diagnostic")
+        csv_files: list[str] = []
+        with open(path, "w", newline="") as output:
+            writer = csv.writer(output)
+            writer.writerow(
+                [
+                    "monotonic_time",
+                    "phase",
+                    "height_mm",
+                    "coil_temperature_c",
+                    "coil_frequency_hz",
+                    "bed_temperature_c",
+                    "bed_target_c",
+                    "extruder_temperature_c",
+                    "extruder_target_c",
+                    "heater_fans",
+                ]
+            )
+
+            def record(phase: str, height: float) -> None:
+                sample = self.mcu.get_last_sample()
+                thermal = self.toolhead.get_thermal_diagnostic_status()
+                writer.writerow(
+                    [
+                        time.monotonic(),
+                        phase,
+                        height,
+                        sample.temperature if sample else "",
+                        sample.frequency if sample else "",
+                        thermal.bed.current,
+                        thermal.bed.target,
+                        thermal.extruder.current,
+                        thermal.extruder.target,
+                        ";".join(f"{name}={speed:.3f}" for name, speed in thermal.heater_fans),
+                    ]
+                )
+                output.flush()
+
+            logger.info(
+                "Diagnostic mode: keeping bed at %d°C and extruder at %d°C through all phases; "
+                "no calibration will be staged. Telemetry: %s",
+                p.bed_temp,
+                p.extruder_temp,
+                path,
+            )
+            try:
+                self.gcode.run_gcode(f"M140 S{p.bed_temp}\nM104 S{p.extruder_temp}\nM106 S0\nM106 P2 S0")
+                self._wait_for_diagnostic_heaters(p, cooling_height, record)
+                for phase, height in enumerate((1, 2, 3)[: p.height_count], 1):
+                    logger.info("Starting diagnostic phase %d of %d (height=%dmm)", phase, p.height_count, height)
+                    self._cool_down_phase(
+                        cooling_height,
+                        p.min_temp,
+                        p.z_speed,
+                        record=lambda h=cooling_height: record("cooldown", h),
+                        keep_bed_on=True,
+                    )
+                    samples = self._heat_up_phase(
+                        height,
+                        p.bed_temp,
+                        p.min_temp,
+                        p.max_temp,
+                        p.z_speed,
+                        record=lambda h=height: record("heating", h),
+                        side_fan_off=True,
+                    )
+                    sample_path = generate_filepath(f"temp_calib_diagnostic_h{height}mm")
+                    write_samples_to_csv(samples, sample_path)
+                    csv_files.append(sample_path)
+                    logger.info("Diagnostic phase %d: %d samples written to %s", phase, len(samples), sample_path)
+            finally:
+                try:
+                    self.toolhead.move(z=cooling_height, speed=p.z_speed)
+                    self.toolhead.wait_moves()
+                except Exception:
+                    logger.exception("Could not lift probe after diagnostic; check printer status")
+                try:
+                    self.gcode.run_gcode("M104 S0\nM140 S0\nM106 S0\nM106 P2 S0")
+                except Exception:
+                    logger.exception("Could not turn off diagnostic heaters and model fan; check printer status")
+
+        logger.info(
+            "Thermal diagnostic complete; no calibration staged. Telemetry: %s\nRaw samples:\n%s",
+            path,
+            "\n".join(csv_files),
+        )
+
+    def _wait_for_diagnostic_heaters(
+        self,
+        p: TemperatureCalibrateParams,
+        height: float,
+        record: Callable[[str, float], None],
+    ) -> None:
+        start = time.monotonic()
+        ready_since: float | None = None
+        while True:
+            self.scheduler.sleep(TEMP_CHECK_INTERVAL)
+            record("preheat", height)
+            thermal = self.toolhead.get_thermal_diagnostic_status()
+            now = time.monotonic()
+            ready = (
+                thermal.bed.current >= p.bed_temp - 1
+                and p.extruder_temp - 2 <= thermal.extruder.current <= p.extruder_temp + 2
+            )
+            if ready:
+                if ready_since is None:
+                    ready_since = now
+                if now - ready_since >= p.soak_seconds:
+                    return
+            else:
+                ready_since = None
+            if now - start >= 3600:
+                msg = "Diagnostic bed/extruder targets did not stabilize within 60 minutes"
+                raise TemperatureStallError(msg)
+
     @log_duration("Cooldown phase")
-    def _cool_down_phase(self, height: float, min_temp: int, z_speed: int) -> None:
+    def _cool_down_phase(
+        self,
+        height: float,
+        min_temp: int,
+        z_speed: int,
+        *,
+        record: Callable[[], None] | None = None,
+        keep_bed_on: bool = False,
+    ) -> None:
         """Cool down the probe to minimum temperature."""
         logger.info("Cooling probe to %d°C, moving to z %.1f", min_temp, height)
 
         self.toolhead.move(z=height, speed=z_speed)
         self.toolhead.wait_moves()
-        self.gcode.run_gcode("M140 S0\nM106 S255")
+        self.gcode.run_gcode("M106 S255\nM106 P2 S255" if keep_bed_on else "M140 S0\nM106 S255")
 
         logger.info("Waiting for coil temperature to reach %d°C", min_temp)
-        self._wait_for_temperature(target_temp=min_temp, cooling=True)
+        self._wait_for_temperature(target_temp=min_temp, cooling=True, record=record)
 
     @log_duration("Heat up phase")
-    def _heat_up_phase(self, height: float, bed_temp: int, min_temp: int, max_temp: int, z_speed: int) -> list[Sample]:
+    def _heat_up_phase(
+        self,
+        height: float,
+        bed_temp: int,
+        min_temp: int,
+        max_temp: int,
+        z_speed: int,
+        *,
+        record: Callable[[], None] | None = None,
+        side_fan_off: bool = False,
+    ) -> list[Sample]:
         """Heat up and collect samples during temperature rise."""
         logger.info("Starting heaters: bed=%d°C, moving to z %.1f", bed_temp, height)
-        self.gcode.run_gcode(f"M140 S{bed_temp}\nM106 S0")
+        self.gcode.run_gcode(f"M140 S{bed_temp}\nM106 S0" + ("\nM106 P2 S0" if side_fan_off else ""))
 
         self.toolhead.move(z=height, speed=z_speed)
         self.toolhead.wait_moves()
 
-        self._wait_for_temperature(target_temp=min_temp - 1, cooling=False)
+        self._wait_for_temperature(target_temp=min_temp - 1, cooling=False, record=record)
 
         logger.info("Collecting data for height %.1f", height)
         samples: list[Sample] = []
 
         self.mcu.register_callback(samples.append)
         try:
-            self._wait_for_temperature(target_temp=max_temp, cooling=False)
+            self._wait_for_temperature(target_temp=max_temp, cooling=False, record=record)
         finally:
             self.mcu.unregister_callback(samples.append)
 
@@ -165,7 +315,9 @@ class TemperatureCalibrateMacro(Macro):
         sample = self.mcu.get_last_sample()
         return sample.temperature if sample is not None else None
 
-    def _wait_for_temperature(self, target_temp: int, cooling: bool) -> None:
+    def _wait_for_temperature(
+        self, target_temp: int, cooling: bool, record: Callable[[], None] | None = None
+    ) -> None:
         """
         Wait for coil temperature with progress monitoring.
 
@@ -188,6 +340,8 @@ class TemperatureCalibrateMacro(Macro):
 
         while True:
             self.scheduler.sleep(TEMP_CHECK_INTERVAL)
+            if record is not None:
+                record()
 
             current_temp = self._get_current_temperature()
             if current_temp is None:

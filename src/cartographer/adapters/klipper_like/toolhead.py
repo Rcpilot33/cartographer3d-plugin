@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC
-from typing import TYPE_CHECKING, Callable, final
+from typing import TYPE_CHECKING, Callable, Protocol, cast, final
 
 from extras.homing import Homing
 from extras.manual_probe import ManualProbeHelper
@@ -11,7 +11,14 @@ from typing_extensions import override
 from cartographer.adapters.klipper.endstop import KlipperEndstop
 from cartographer.adapters.klipper_like.axis_compat import uses_string_homing_axes
 from cartographer.adapters.klipper_like.utils import reraise_from_klipper
-from cartographer.interfaces.printer import Endstop, HomingAxis, Position, TemperatureStatus, Toolhead
+from cartographer.interfaces.printer import (
+    Endstop,
+    HomingAxis,
+    Position,
+    TemperatureStatus,
+    ThermalDiagnosticStatus,
+    Toolhead,
+)
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper
@@ -29,6 +36,15 @@ axis_mapping: dict[HomingAxis, int] = {
     "y": 1,
     "z": 2,
 }
+
+
+class _StatusObject(Protocol):
+    def get_status(self, eventtime: float) -> dict[str, float]: ...
+
+
+class _ThermalStatusPrinter(Protocol):
+    def lookup_object(self, name: str) -> _StatusObject: ...
+    def lookup_objects(self, module: str) -> list[tuple[str, _StatusObject]]: ...
 
 
 def axis_to_index(axis: HomingAxis) -> int:
@@ -168,3 +184,19 @@ class KlipperLikeToolhead(Toolhead, ABC):
         time = self.mcu.get_current_time()
         heater = self.toolhead.get_extruder().get_heater().get_status(time)
         return TemperatureStatus(heater["temperature"], heater["target"])
+
+    @override
+    def get_thermal_diagnostic_status(self) -> ThermalDiagnosticStatus:
+        eventtime = self.mcu.get_current_time()
+        printer = cast("_ThermalStatusPrinter", self.printer)
+        bed = printer.lookup_object("heater_bed").get_status(eventtime)
+        extruder = self.toolhead.get_extruder().get_heater().get_status(eventtime)
+        fans: list[tuple[str, float]] = []
+        for name, fan in printer.lookup_objects("heater_fan"):
+            status = fan.get_status(eventtime)
+            fans.append((name, status.get("speed", 0.0)))
+        return ThermalDiagnosticStatus(
+            bed=TemperatureStatus(bed["temperature"], bed["target"]),
+            extruder=TemperatureStatus(extruder["temperature"], extruder["target"]),
+            heater_fans=tuple(fans),
+        )
