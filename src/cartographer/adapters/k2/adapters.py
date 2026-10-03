@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING, cast, final
+from typing import TYPE_CHECKING, final
 
 from cartographer.adapters.k2.mcu_platform import K2McuPlatform
-from cartographer.adapters.k2.warnings import clear_disconnected_warning
+from cartographer.adapters.k2.warnings import clear_disconnected_warning_from_printer
 from cartographer.adapters.klipper.axis_twist_compensation import KlipperAxisTwistCompensationAdapter
 from cartographer.adapters.klipper.bed_mesh import KlipperBedMesh
 from cartographer.adapters.klipper.configuration import KlipperConfiguration
@@ -18,9 +17,6 @@ from cartographer.runtime.adapters import Adapters
 
 if TYPE_CHECKING:
     from configfile import ConfigWrapper as KlipperConfigWrapper
-
-
-logger = logging.getLogger(__name__)
 
 
 @final
@@ -43,5 +39,4 @@ class K2Adapters(Adapters):
             self.axis_twist_compensation = KlipperAxisTwistCompensationAdapter(config)
 
     def on_reconnect_models_validated(self) -> None:
-        configfile = cast("object", self.printer.lookup_object("configfile"))
-        clear_disconnected_warning(configfile)
+        clear_disconnected_warning_from_printer(self.printer)

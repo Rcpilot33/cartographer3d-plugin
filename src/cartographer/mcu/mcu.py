@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES = 100
+
 
 class _RawData(TypedDict):
     clock: int
@@ -81,6 +83,7 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
     ) -> None:
         self._platform: McuPlatform = platform
         self._sensor_ready: bool = False
+        self._invalid_temperature_sample_count: int = 0
         self._reconnect_callbacks: list[Callable[[], None]] = []
         reactor: Reactor = platform.get_reactor()
         self._stream: CartographerStream[Sample] = CartographerStream[Sample](self, reactor)
@@ -261,6 +264,15 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
 
     def _handle_reconnect(self) -> None:
         logger.info("Cartographer MCU reconnected")
+        try:
+            # A USB disconnect can re-enumerate without resetting the sensor
+            # MCU.  Explicitly disable any stream that survived the link loss
+            # before model callbacks or new sessions use the connection.
+            self.stop_streaming()
+        except Exception as e:
+            logger.exception("Failed to reset Cartographer stream after reconnect")
+            self._platform.invoke_shutdown(f"Cartographer MCU reconnect failed: {e}")
+            return
         for callback in self._reconnect_callbacks:
             try:
                 callback()
@@ -272,6 +284,9 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
     def _handle_disconnect(self) -> None:
         logger.warning("Cartographer MCU disconnected")
         self._sensor_ready = False
+        # Stop high-rate host processing immediately.  The MCU command cannot
+        # be sent while disconnected; reconnect performs the hardware reset.
+        self._async_processor.set_immediate(False)
         self._stream.abort_all_sessions(McuDisconnectedError())
 
     def _handle_data(self, data: _RawData) -> None:
@@ -311,8 +326,23 @@ class CartographerMcu(Mcu, CartographerStreamMcu):
         frequency = self.constants.count_to_frequency(count)
         temperature = self.constants.calculate_temperature(data["temp"])
         if not -20 <= temperature <= 200:
-            logger.debug("Skipping sample with invalid temperature: %.1f", temperature)
+            self._invalid_temperature_sample_count += 1
+            if self._invalid_temperature_sample_count == 1:
+                logger.warning("Skipping Cartographer sample with invalid temperature: %.1fC", temperature)
+            if (
+                self._invalid_temperature_sample_count >= MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES
+                and self._stream.sessions
+            ):
+                msg = (
+                    "Cartographer stopped producing usable samples after "
+                    f"{self._invalid_temperature_sample_count} consecutive invalid temperature readings "
+                    f"(latest: {temperature:.1f}C). Check the sensor thermistor and USB connection."
+                )
+                if self._invalid_temperature_sample_count == MAX_CONSECUTIVE_INVALID_TEMPERATURE_SAMPLES:
+                    logger.error(msg)
+                self._stream.abort_all_sessions(RuntimeError(msg))
             return
+        self._invalid_temperature_sample_count = 0
         position = self._platform.get_requested_position(time)
 
         sample = Sample(

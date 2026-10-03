@@ -77,6 +77,9 @@ class K2McuPlatform(KlipperLikeMcuPlatform):
                 # or C dispatch allocation may be used with that new connection.
                 self._finalization_failed = False
                 try:
+                    if self._k2_mcu.is_non_critical and self._k2_mcu.non_critical_disconnected:
+                        msg = "Cartographer reconnect event fired while MCU still reports disconnected"
+                        raise RuntimeError(msg)
                     if self._config_callback is not None:
                         self._config_callback()
                     if self._dispatch is not None:

@@ -5,7 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from cartographer.adapters.klipper.probe import KlipperProbeSession
+import cartographer.adapters.klipper_like.utils as _utils_module
+from cartographer.adapters.klipper.probe import KlipperCartographerProbe, KlipperProbeSession
 from cartographer.interfaces.printer import Position
 
 if TYPE_CHECKING:
@@ -86,3 +87,16 @@ class TestEndProbeSession:
         session.end_probe_session()
 
         assert session.pull_probed_results() == []
+
+
+class _FakeCommandError(Exception):
+    pass
+
+
+def test_legacy_probing_move_raises_command_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_utils_module, "CommandError", _FakeCommandError)
+    config = Mock(lift_speed=5.0)
+    probe = KlipperCartographerProbe(Mock(), Mock(), Mock(), Mock(), config)
+
+    with pytest.raises(_FakeCommandError, match="does not support the legacy probing_move API"):
+        probe.probing_move([0.0, 0.0, 0.0], 5.0)

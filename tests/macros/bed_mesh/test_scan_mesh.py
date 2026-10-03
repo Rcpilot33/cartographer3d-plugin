@@ -10,6 +10,7 @@ from typing_extensions import override
 from cartographer.interfaces.configuration import MeshPath
 from cartographer.interfaces.errors import McuDisconnectedError
 from cartographer.interfaces.printer import Position, Sample, Toolhead
+from cartographer.macros.bed_mesh.helpers import GridPointResult
 from cartographer.macros.bed_mesh.interfaces import BedMeshAdapter
 from cartographer.macros.bed_mesh.scan_mesh import BedMeshCalibrateConfiguration, BedMeshCalibrateMacro
 from tests.mocks.config import MockConfiguration, default_general_config
@@ -102,6 +103,43 @@ class MockBedMeshAdapter(BedMeshAdapter):
 
 class TestBedMeshIntegration:
     """Integration tests for bed mesh calibration."""
+
+    def test_mesh_rejects_excessive_nonfinite_sample_fraction(
+        self,
+        bed_mesh_macro: BedMeshCalibrateMacro,
+    ) -> None:
+        results = [
+            GridPointResult(point=(float(index), 0.0), z=1.0, sample_count=3, nonfinite_sample_count=2)
+            for index in range(4)
+        ]
+
+        with pytest.raises(RuntimeError, match="too many samples were outside the calibrated model range"):
+            bed_mesh_macro._results_to_positions(results, height=2.0)
+
+    def test_mesh_rejects_grid_point_with_majority_nonfinite_samples(
+        self,
+        bed_mesh_macro: BedMeshCalibrateMacro,
+    ) -> None:
+        results = [
+            GridPointResult(point=(0.0, 0.0), z=1.0, sample_count=1, nonfinite_sample_count=2),
+            GridPointResult(point=(1.0, 0.0), z=1.0, sample_count=10),
+        ]
+
+        with pytest.raises(RuntimeError, match="majority of non-finite samples"):
+            bed_mesh_macro._results_to_positions(results, height=2.0)
+
+    def test_mesh_allows_small_nonfinite_sample_fraction(
+        self,
+        bed_mesh_macro: BedMeshCalibrateMacro,
+    ) -> None:
+        results = [
+            GridPointResult(point=(0.0, 0.0), z=1.0, sample_count=4, nonfinite_sample_count=1),
+            GridPointResult(point=(1.0, 0.0), z=1.0, sample_count=4),
+        ]
+
+        positions = bed_mesh_macro._results_to_positions(results, height=2.0)
+
+        assert len(positions) == 2
 
     @pytest.mark.parametrize("phase", ["before_move", "during_move", "drain"])
     def test_aborted_scan_does_not_queue_more_moves_or_apply_mesh(
