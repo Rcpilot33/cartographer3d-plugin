@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import unittest
 from importlib.util import find_spec
+from unittest.mock import patch
 
 import numpy as np
 
-from cartographer.coil.calibration import _downsample_by_temperature, _process_samples, fit_coil_temperature_model
+from cartographer.coil.calibration import (
+    _downsample_by_temperature,
+    _process_samples,
+    fit_coil_temperature_model,
+    validate_coil_temperature_model,
+)
 from cartographer.coil.helpers import line0, line120, line_fit
+from cartographer.interfaces.configuration import CoilCalibrationConfiguration
 from cartographer.interfaces.printer import CoilCalibrationReference, Sample
 
 
@@ -47,6 +54,24 @@ class TestCoilCalibration(unittest.TestCase):
         self.assertTrue(np.isfinite(b))
         self.assertTrue(np.isfinite(frequency))
 
+    def test_negative_curvature_with_rising_frequency_uses_cold_vertex(self) -> None:
+        a, b, frequency = _process_samples(_samples(-1.3, 235.0, 3_056_000.0))
+        self.assertGreater(a, 0.0)
+        self.assertEqual(b, 0.0)
+        self.assertTrue(np.isfinite(frequency))
+
+    def test_three_height_downward_curves_do_not_produce_linear_only_model(self) -> None:
+        # These curves approximate the three measured heights that exposed the boundary bug.
+        data = {
+            1.0: _samples(-4.7, 771.0, 3_068_223.0),
+            2.0: _samples(-1.3, 235.0, 3_056_031.0),
+            3.0: _samples(-1.5, 198.0, 3_039_918.0),
+        }
+        model = fit_coil_temperature_model(data, CoilCalibrationReference(2_943_053.8, 25.0))
+        self.assertNotEqual((model.a_a, model.a_b), (0.0, 0.0))
+        self.assertAlmostEqual(model.b_a, 0.0, places=10)
+        self.assertAlmostEqual(model.b_b, 0.0, places=7)
+
     def test_zero_curvature_does_not_divide_by_zero(self) -> None:
         a, b, frequency = _process_samples(_samples(0.0, 0.0, 3_000_000.0))
         self.assertGreaterEqual(a, 0.0)
@@ -86,6 +111,21 @@ class TestCoilCalibration(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "need at least 300"):
             _process_samples(_samples(0.02, -1.6, 3_000_000.0, 299))
 
+    def test_rejects_frequency_collapsing_calibration(self) -> None:
+        data = {float(height): _samples(-1.3, 235.0, 3_056_000.0 - 20_000.0 * height) for height in (1, 2, 3)}
+        bad = CoilCalibrationConfiguration(0.0, 0.0, 0.003721662845787226, -377.8946595557704)
+        with self.assertRaisesRegex(RuntimeError, "same-temperature identity"):
+            validate_coil_temperature_model(bad, data, CoilCalibrationReference(2_943_053.841590951, 25.0))
+
+    def test_rejects_calibration_that_does_not_reduce_drift(self) -> None:
+        data = {float(height): _samples(0.02, -1.6, 3_000_000.0 - 20_000.0 * height) for height in (1, 2, 3)}
+        no_correction = CoilCalibrationConfiguration(1e-8, 1e-5, 2e-8, 1e-4)
+        with patch(
+            "cartographer.coil.calibration.CoilTemperatureCompensationModel.compensate",
+            side_effect=lambda frequency, source, target: frequency,
+        ), self.assertRaisesRegex(RuntimeError, "does not reduce measured frequency drift"):
+            validate_coil_temperature_model(no_correction, data, CoilCalibrationReference(2_900_000.0, 25.0))
+
     @unittest.skipUnless(find_spec("scipy") is not None, "SciPy is optional")
     def test_matches_scipy_across_fit_paths(self) -> None:
         from scipy.optimize import curve_fit
@@ -95,6 +135,7 @@ class TestCoilCalibration(unittest.TestCase):
             (0.02, -6.0, 500, 0.01),
             (0.02, 0.2, 500, 0.01),
             (0.02, -1.6, 1200, 0.01),
+            (-1.3, 235.0, 500, 0.01),
         )
         for a_input, b_input, count, noise in cases:
             with self.subTest(a=a_input, b=b_input, count=count):

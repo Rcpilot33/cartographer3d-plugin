@@ -6,7 +6,15 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from cartographer.interfaces.printer import Position, Sample, TemperatureStatus, ThermalDiagnosticStatus
+from cartographer.interfaces.configuration import CoilCalibrationConfiguration
+from cartographer.interfaces.printer import (
+    ChamberFanStatus,
+    CoilCalibrationReference,
+    Position,
+    Sample,
+    TemperatureStatus,
+    ThermalDiagnosticStatus,
+)
 from cartographer.macros.temperature_calibrate import TemperatureCalibrateMacro
 from cartographer.toolhead import BacklashCompensatingToolhead
 from tests.mocks.config import MockConfiguration
@@ -21,6 +29,10 @@ class TestTemperatureDiagnostic(TestCase):
         self.toolhead.is_homed.return_value = True
         self.toolhead.get_axis_limits.return_value = (0.0, 350.0)
         self.toolhead.get_position.return_value = Position(0.0, 0.0, 0.0)
+        self.toolhead.calibration_aux_fan_gcode.side_effect = lambda speed: f"M106 P2 S{speed}"
+        self.toolhead.get_calibration_chamber_fan_status.return_value = None
+        self.toolhead.calibration_chamber_fan_off_gcode.return_value = ""
+        self.toolhead.calibration_chamber_fan_restore_gcode.return_value = ""
         self.toolhead.get_thermal_diagnostic_status.return_value = ThermalDiagnosticStatus(
             bed=TemperatureStatus(25.0, 0.0),
             extruder=TemperatureStatus(25.0, 0.0),
@@ -86,6 +98,55 @@ class TestTemperatureDiagnostic(TestCase):
             self.assertEqual(rows[0]["bed_target_c"], "0.0")
             self.assertEqual(rows[0]["heater_fans"], "heater_fan hotend=0.000")
 
+    def test_normal_run_uses_same_controlled_phases_before_staging(self) -> None:
+        self.params.params["DIAGNOSTIC"] = "0"
+        model = CoilCalibrationConfiguration(1e-5, 0.1, 0.0, 0.0)
+        self.mcu.get_coil_reference.return_value = CoilCalibrationReference(2_900_000.0, 25.0)
+        self.executor.run.side_effect = [model, None]
+        with TemporaryDirectory() as directory:
+            paths = iter(f"{directory}/normal_{n}.csv" for n in range(4))
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch(
+                        "cartographer.macros.temperature_calibrate.generate_filepath",
+                        side_effect=lambda _: next(paths),
+                    )
+                )
+                stack.enter_context(patch.object(self.macro, "_wait_for_diagnostic_heaters"))
+                cooldown = stack.enter_context(patch.object(self.macro, "_cool_down_phase"))
+                heatup = stack.enter_context(patch.object(self.macro, "_heat_up_phase", return_value=[]))
+                self.macro.run(self.params)
+
+        self.assertEqual(cooldown.call_count, 3)
+        self.assertTrue(all(call.kwargs["keep_bed_on"] for call in cooldown.call_args_list))
+        self.assertEqual(heatup.call_count, 3)
+        self.assertTrue(all(call.kwargs["side_fan_off"] for call in heatup.call_args_list))
+        self.assertEqual(self.gcode.run_gcode.call_args_list[0].args[0], "M140 S110\nM104 S60\nM106 S0\nM106 P2 S0")
+        self.assertEqual(self.gcode.run_gcode.call_args_list[-1].args[0], "M104 S0\nM140 S0\nM106 S0\nM106 P2 S0")
+        self.assertEqual(self.executor.run.call_count, 2)
+        self.assertIs(self.config.coil.calibration, model)
+
+    def test_failed_validation_does_not_stage_normal_calibration(self) -> None:
+        self.params.params["DIAGNOSTIC"] = "0"
+        self.mcu.get_coil_reference.return_value = CoilCalibrationReference(2_900_000.0, 25.0)
+        self.executor.run.side_effect = [CoilCalibrationConfiguration(0.0, 0.0, 1.0, 1.0), RuntimeError("unsafe")]
+        with TemporaryDirectory() as directory:
+            paths = iter(f"{directory}/normal_{n}.csv" for n in range(4))
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch(
+                        "cartographer.macros.temperature_calibrate.generate_filepath",
+                        side_effect=lambda _: next(paths),
+                    )
+                )
+                stack.enter_context(patch.object(self.macro, "_wait_for_diagnostic_heaters"))
+                stack.enter_context(patch.object(self.macro, "_cool_down_phase"))
+                stack.enter_context(patch.object(self.macro, "_heat_up_phase", return_value=[]))
+                with self.assertRaisesRegex(RuntimeError, "unsafe"):
+                    self.macro.run(self.params)
+        self.assertIsNone(self.config.coil.calibration)
+        self.assertEqual(self.gcode.run_gcode.call_args_list[-1].args[0], "M104 S0\nM140 S0\nM106 S0\nM106 P2 S0")
+
     def test_rejects_active_heater_before_moving(self) -> None:
         self.toolhead.get_thermal_diagnostic_status.return_value = ThermalDiagnosticStatus(
             bed=TemperatureStatus(60.0, 60.0),
@@ -97,9 +158,65 @@ class TestTemperatureDiagnostic(TestCase):
         self.toolhead.move.assert_not_called()
         self.gcode.run_gcode.assert_not_called()
 
+    def test_rejects_active_chamber_heater_before_moving(self) -> None:
+        self.toolhead.get_calibration_chamber_fan_status.return_value = ChamberFanStatus(35.0, 0.0, 0.0, 45.0)
+        with self.assertRaisesRegex(RuntimeError, "chamber heater target at zero"):
+            self.macro.run(self.params)
+        self.toolhead.move.assert_not_called()
+        self.gcode.run_gcode.assert_not_called()
+
+    def test_chamber_fan_is_turned_off_and_prior_target_restored(self) -> None:
+        self.toolhead.get_calibration_chamber_fan_status.return_value = ChamberFanStatus(35.0, 0.0, 0.0, 0.0)
+        self.toolhead.calibration_chamber_fan_off_gcode.return_value = (
+            "M107 P1\nSET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber_fan TARGET=80.000000"
+        )
+        self.toolhead.calibration_chamber_fan_restore_gcode.return_value = (
+            "SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber_fan TARGET=35.000000"
+        )
+        with TemporaryDirectory() as directory, ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "cartographer.macros.temperature_calibrate.generate_filepath",
+                    return_value=f"{directory}/thermal.csv",
+                )
+            )
+            stack.enter_context(patch.object(self.macro, "_wait_for_diagnostic_heaters"))
+            stack.enter_context(patch.object(self.macro, "_cool_down_phase", side_effect=RuntimeError("stalled")))
+            with self.assertRaisesRegex(RuntimeError, "stalled"):
+                self.macro.run(self.params)
+        commands = [call.args[0] for call in self.gcode.run_gcode.call_args_list]
+        self.assertIn("M107 P1\nSET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber_fan TARGET=80.000000", commands[0])
+        self.assertEqual(commands[-1], "SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber_fan TARGET=35.000000")
+        self.assertIsNone(self.config.coil.calibration)
+
+    def test_chamber_fan_activating_midrun_aborts_without_staging(self) -> None:
+        self.params.params["DIAGNOSTIC"] = "0"
+        self.toolhead.get_calibration_chamber_fan_status.side_effect = [
+            ChamberFanStatus(35.0, 0.0, 0.0, 0.0),
+            ChamberFanStatus(80.0, 1.0, 0.0, 0.0),
+        ]
+        with TemporaryDirectory() as directory, ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "cartographer.macros.temperature_calibrate.generate_filepath",
+                    return_value=f"{directory}/thermal.csv",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    self.macro,
+                    "_wait_for_diagnostic_heaters",
+                    side_effect=lambda _p, height, record: record("heating", height),
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "chamber fan turned on"):
+                self.macro.run(self.params)
+        self.executor.run.assert_not_called()
+        self.assertIsNone(self.config.coil.calibration)
+
     def test_backlash_wrapper_passes_through_thermal_status(self) -> None:
         self.macro.toolhead = BacklashCompensatingToolhead(self.toolhead, 0.05)
-        with patch.object(self.macro, "_run_diagnostic") as diagnostic:
+        with patch.object(self.macro, "_run_controlled") as diagnostic:
             self.macro.run(self.params)
         self.toolhead.get_thermal_diagnostic_status.assert_called_once_with()
         diagnostic.assert_called_once()
@@ -130,6 +247,13 @@ class TestTemperatureDiagnostic(TestCase):
         with patch.object(self.macro, "_wait_for_temperature"):
             self.macro._cool_down_phase(200.0, 50, 5, keep_bed_on=True)
         self.gcode.run_gcode.assert_called_once_with("M106 S255\nM106 P2 S255")
+
+    def test_non_k2_controlled_cooldown_omits_auxiliary_fan_command(self) -> None:
+        self.toolhead.calibration_aux_fan_gcode.side_effect = None
+        self.toolhead.calibration_aux_fan_gcode.return_value = ""
+        with patch.object(self.macro, "_wait_for_temperature"):
+            self.macro._cool_down_phase(200.0, 50, 5, keep_bed_on=True)
+        self.gcode.run_gcode.assert_called_once_with("M106 S255")
 
     def test_normal_cooldown_leaves_side_fan_control_unchanged(self) -> None:
         with patch.object(self.macro, "_wait_for_temperature"):

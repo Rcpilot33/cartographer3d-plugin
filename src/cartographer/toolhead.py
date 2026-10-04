@@ -5,6 +5,7 @@ from typing import Callable
 from typing_extensions import override
 
 from cartographer.interfaces.printer import (
+    ChamberFanStatus,
     Endstop,
     HomingAxis,
     Position,
@@ -85,6 +86,22 @@ class BacklashCompensatingToolhead(Toolhead):
     @override
     def get_thermal_diagnostic_status(self) -> ThermalDiagnosticStatus:
         return self.toolhead.get_thermal_diagnostic_status()
+
+    @override
+    def calibration_aux_fan_gcode(self, speed: int) -> str:
+        return self.toolhead.calibration_aux_fan_gcode(speed)
+
+    @override
+    def get_calibration_chamber_fan_status(self) -> ChamberFanStatus | None:
+        return self.toolhead.get_calibration_chamber_fan_status()
+
+    @override
+    def calibration_chamber_fan_off_gcode(self) -> str:
+        return self.toolhead.calibration_chamber_fan_off_gcode()
+
+    @override
+    def calibration_chamber_fan_restore_gcode(self, target: float) -> str:
+        return self.toolhead.calibration_chamber_fan_restore_gcode(target)
 
     @override
     def get_max_accel(self) -> float:

@@ -3,12 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, final
 
 from cartographer.adapters.k2.mcu_platform import K2McuPlatform
+from cartographer.adapters.k2.toolhead import K2Toolhead
 from cartographer.adapters.k2.warnings import clear_disconnected_warning_from_printer
 from cartographer.adapters.klipper.axis_twist_compensation import KlipperAxisTwistCompensationAdapter
 from cartographer.adapters.klipper.bed_mesh import KlipperBedMesh
 from cartographer.adapters.klipper.configuration import KlipperConfiguration
 from cartographer.adapters.klipper.gcode import KlipperGCodeDispatch
-from cartographer.adapters.klipper.toolhead import KlipperToolhead
 from cartographer.adapters.klipper_like.scheduler import KlipperScheduler
 from cartographer.config.fields import parse
 from cartographer.interfaces.configuration import GeneralConfig
@@ -30,7 +30,7 @@ class K2Adapters(Adapters):
         self.mcu = CartographerMcu(platform, self.scheduler)
         self.config = KlipperConfiguration(config, self.mcu, general)
 
-        self.toolhead = KlipperToolhead(config, self.mcu)
+        self.toolhead = K2Toolhead(config, self.mcu)
         self.bed_mesh = KlipperBedMesh(config)
         self.gcode = KlipperGCodeDispatch(self.printer)
 

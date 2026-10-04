@@ -4,12 +4,21 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from cartographer.coil.temperature_compensation import CoilTemperatureCompensationModel
 from cartographer.interfaces.configuration import CoilCalibrationConfiguration
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from cartographer.interfaces.printer import CoilCalibrationReference, Sample
+
+
+class _CalibrationReferenceMcu:
+    def __init__(self, reference: CoilCalibrationReference) -> None:
+        self.reference = reference
+
+    def get_coil_reference(self) -> CoilCalibrationReference:
+        return self.reference
 
 
 def fit_coil_temperature_model(
@@ -54,6 +63,91 @@ def fit_coil_temperature_model(
         b_a=linear_params_b[0],  # Slope for 'b' coefficient vs frequency
         b_b=linear_params_b[1],  # Intercept for 'b' coefficient vs frequency
     )
+
+
+def validate_coil_temperature_model(
+    config: CoilCalibrationConfiguration,
+    data_per_height: dict[float, list[Sample]],
+    reference: CoilCalibrationReference,
+) -> None:
+    """Reject compensation that breaks probe ordering or fails to reduce measured drift."""
+    coefficients = (config.a_a, config.a_b, config.b_a, config.b_b)
+    if not all(np.isfinite(coefficient) for coefficient in coefficients):
+        msg = "Coil calibration produced non-finite coefficients; no calibration was staged"
+        raise RuntimeError(msg)
+
+    samples = [sample for height_samples in data_per_height.values() for sample in height_samples]
+    if not samples:
+        msg = "Coil calibration has no samples; no calibration was staged"
+        raise RuntimeError(msg)
+
+    frequencies = np.asarray([sample.frequency for sample in samples])
+    temperatures = np.asarray([sample.temperature for sample in samples])
+    if not np.all(np.isfinite(frequencies)) or not np.all(np.isfinite(temperatures)):
+        msg = "Coil calibration contains non-finite samples; no calibration was staged"
+        raise RuntimeError(msg)
+
+    compensation = CoilTemperatureCompensationModel(config, _CalibrationReferenceMcu(reference))
+    frequency_grid = np.linspace(float(frequencies.min()), float(frequencies.max()), 9)
+    temperature_grid = np.linspace(float(temperatures.min()), float(temperatures.max()), 5)
+    target_temperature = float(np.median(temperatures))
+
+    try:
+        for source_temperature in temperature_grid:
+            for frequency in frequency_grid:
+                same = compensation.compensate(float(frequency), float(source_temperature), float(source_temperature))
+                if not np.isfinite(same) or abs(same - frequency) > 1.0:
+                    msg = "Coil calibration fails same-temperature identity; no calibration was staged"
+                    raise RuntimeError(msg)
+            for target in (float(temperature_grid[0]), target_temperature, float(temperature_grid[-1])):
+                corrected = [
+                    compensation.compensate(float(frequency), float(source_temperature), target)
+                    for frequency in frequency_grid
+                ]
+                if not np.all(np.isfinite(corrected)) or np.any(np.diff(corrected) <= 0.0):
+                    msg = "Coil calibration reverses or collapses probe frequency; no calibration was staged"
+                    raise RuntimeError(msg)
+    except (ArithmeticError, ValueError) as exc:
+        msg = "Coil calibration compensation is undefined; no calibration was staged"
+        raise RuntimeError(msg) from exc
+
+    raw_error = 0.0
+    corrected_error = 0.0
+    measured_heights = 0
+    for height_samples in data_per_height.values():
+        if not height_samples:
+            continue
+        height_temperatures = np.asarray([sample.temperature for sample in height_samples])
+        centers = np.linspace(float(height_temperatures.min()) + 2.0, float(height_temperatures.max()) - 2.0, 8)
+        raw_medians: list[float] = []
+        corrected_medians: list[float] = []
+        for center in centers:
+            nearby = [sample for sample in height_samples if abs(sample.temperature - center) <= 1.0]
+            if len(nearby) < 3:
+                continue
+            raw_medians.append(float(np.median([sample.frequency for sample in nearby])))
+            try:
+                corrected = [
+                    compensation.compensate(sample.frequency, sample.temperature, target_temperature)
+                    for sample in nearby
+                ]
+            except (ArithmeticError, ValueError) as exc:
+                msg = "Coil calibration compensation is undefined; no calibration was staged"
+                raise RuntimeError(msg) from exc
+            if not np.all(np.isfinite(corrected)):
+                msg = "Coil calibration compensation is non-finite; no calibration was staged"
+                raise RuntimeError(msg)
+            corrected_medians.append(float(np.median(corrected)))
+        if len(raw_medians) < 3:
+            msg = "Coil calibration has insufficient temperature coverage; no calibration was staged"
+            raise RuntimeError(msg)
+        raw_error += (max(raw_medians) - min(raw_medians)) ** 2
+        corrected_error += (max(corrected_medians) - min(corrected_medians)) ** 2
+        measured_heights += 1
+
+    if measured_heights < 3 or corrected_error >= raw_error:
+        msg = "Coil calibration does not reduce measured frequency drift; no calibration was staged"
+        raise RuntimeError(msg)
 
 
 def _least_squares(x: NDArray[np.float_], y: NDArray[np.float_] | list[float]) -> NDArray[np.float_]:
@@ -154,8 +248,9 @@ def _process_samples(samples: list[Sample]) -> tuple[float, float, float]:
     # Fit quadratic: freq = a*temp² + b*temp + c
     a, b, c = _fit_nonnegative_quadratic(temperatures, frequencies)
 
-    # Calculate vertex position of the quadratic: x = -b/(2a)
-    vertex_temperature = -b / (2 * a) if a > 0 else (float("inf") if b < 0 else 0.0)
+    # A linear boundary fit has no finite vertex. Route rising frequency to the
+    # cold-vertex refit, matching the bounded SciPy fit's near-zero positive a.
+    vertex_temperature = -b / (2 * a) if a > 0 else (float("inf") if b < 0 else float("-inf"))
 
     # Handle constrained cases based on vertex position
     if vertex_temperature > 120:

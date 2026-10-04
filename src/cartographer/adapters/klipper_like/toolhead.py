@@ -12,6 +12,7 @@ from cartographer.adapters.klipper.endstop import KlipperEndstop
 from cartographer.adapters.klipper_like.axis_compat import uses_string_homing_axes
 from cartographer.adapters.klipper_like.utils import reraise_from_klipper
 from cartographer.interfaces.printer import (
+    ChamberFanStatus,
     Endstop,
     HomingAxis,
     Position,
@@ -200,3 +201,21 @@ class KlipperLikeToolhead(Toolhead, ABC):
             extruder=TemperatureStatus(extruder["temperature"], extruder["target"]),
             heater_fans=tuple(fans),
         )
+
+    @override
+    def calibration_aux_fan_gcode(self, speed: int) -> str:
+        del speed
+        return ""
+
+    @override
+    def get_calibration_chamber_fan_status(self) -> ChamberFanStatus | None:
+        return None
+
+    @override
+    def calibration_chamber_fan_off_gcode(self) -> str:
+        return ""
+
+    @override
+    def calibration_chamber_fan_restore_gcode(self, target: float) -> str:
+        del target
+        return ""

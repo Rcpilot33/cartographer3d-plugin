@@ -157,6 +157,13 @@ class ThermalDiagnosticStatus(NamedTuple):
     heater_fans: tuple[tuple[str, float], ...]
 
 
+class ChamberFanStatus(NamedTuple):
+    target: float
+    speed: float
+    direct_speed: float
+    heater_target: float
+
+
 class GCodeDispatch(Protocol):
     def run_gcode(self, script: str) -> None:
         """Run the given gcode script."""
@@ -226,6 +233,22 @@ class Toolhead(Protocol):
 
     def get_thermal_diagnostic_status(self) -> ThermalDiagnosticStatus:
         """Read bed, extruder, and heater-fan status for calibration diagnostics."""
+        ...
+
+    def calibration_aux_fan_gcode(self, speed: int) -> str:
+        """Return platform-specific auxiliary cooling command, if available."""
+        ...
+
+    def get_calibration_chamber_fan_status(self) -> ChamberFanStatus | None:
+        """Return chamber and direct case-fan state when the platform has one."""
+        ...
+
+    def calibration_chamber_fan_off_gcode(self) -> str:
+        """Return commands that prevent chamber cooling from disturbing a run."""
+        ...
+
+    def calibration_chamber_fan_restore_gcode(self, target: float) -> str:
+        """Restore the prior chamber thermostat target after a run."""
         ...
 
     def get_max_accel(self) -> float:
