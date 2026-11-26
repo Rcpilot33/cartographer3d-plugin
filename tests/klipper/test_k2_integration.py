@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from cartographer.adapters.klipper.endstop import KlipperEndstop
+from cartographer.core import PrinterCartographer
 from cartographer.interfaces.errors import McuDisconnectedError
 from cartographer.runtime.environment import Environment, detect_environment
 
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from pytest_mock import MockerFixture
+
+    from cartographer.interfaces.configuration import Configuration
+    from cartographer.interfaces.printer import Toolhead
 
 
 @pytest.fixture
@@ -165,6 +169,36 @@ def test_query_disconnected_endstop_is_fail_closed() -> None:
     probe = Mock()
     assert KlipperEndstop(mcu, probe).query_endstop(0.0) == 1
     probe.query_is_triggered.assert_not_called()
+
+
+def test_k2_stationary_probe_and_safe_move_z_contract(
+    config: Configuration, toolhead: Toolhead, carto_mcu: type, mocker: MockerFixture
+) -> None:
+    """Exercise the plugin interfaces used by both printer-side K2 helpers."""
+    platform = Mock()
+    mcu = carto_mcu(platform, Mock())
+    printer = PrinterCartographer(Mock(config=config, mcu=mcu, toolhead=toolhead))
+    scan = printer.scan_mode
+
+    # The stationary-probe helper wraps perform_probe on this instance and
+    # waits on the same toolhead that will make the probing move.
+    assert vars(scan)["_toolhead"] is toolhead
+    assert callable(toolhead.is_homed)
+    assert callable(toolhead.wait_moves)
+    wrapped = mocker.patch.object(scan, "perform_probe", return_value=0.25)
+    assert scan.perform_probe() == 0.25
+    wrapped.assert_called_once_with()
+    assert scan.is_ready is False
+    with pytest.raises(RuntimeError, match="model not loaded"):
+        _ = scan.get_model()
+
+    # SAFE_MOVE_Z passes this MCU and scan mode to the Klipper endstop.
+    assert printer.mcu is mcu
+    endstop = KlipperEndstop(mcu, scan)
+    assert endstop.get_mcu() is platform.host_mcu
+    platform.is_disconnected.return_value = True
+    assert printer.mcu.is_disconnected() is True
+    assert endstop.query_endstop(0.0) == 1
 
 
 def test_stop_homing_still_disarms_after_disconnect(carto_mcu: type) -> None:
